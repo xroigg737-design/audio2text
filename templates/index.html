@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audio2Text</title>
+<style>
+  :root {
+    --bg: #1a1a2e;
+    --bg-deep: #0f0c29;
+    --surface: #16213e;
+    --border: #0f3460;
+    --accent: #7aafff;
+    --accent-hover: #5a90e0;
+    --text: #eee;
+    --muted: #888;
+    --success: #2dd4bf;
+    --error: #e94560;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: linear-gradient(135deg, var(--bg-deep), var(--bg));
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  nav {
+    background: var(--surface);
+    border-bottom: 2px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    height: 56px;
+    gap: 16px;
+  }
+  nav .brand {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--accent);
+    letter-spacing: 1px;
+  }
+  nav .version {
+    font-size: 0.7rem;
+    color: var(--muted);
+  }
+  nav .back {
+    margin-left: auto;
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 0.85rem;
+    transition: color 0.2s;
+  }
+  nav .back:hover { color: var(--text); }
+
+  .container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 32px 20px;
+  }
+
+  h2 {
+    font-size: 1.1rem;
+    margin-bottom: 20px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* Drop zone */
+  .drop-zone {
+    border: 2px dashed rgba(122,175,255,0.3);
+    border-radius: 12px;
+    padding: 48px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s;
+    background: rgba(122,175,255,0.03);
+    margin-bottom: 20px;
+    position: relative;
+  }
+  .drop-zone:hover, .drop-zone.dragover {
+    border-color: var(--accent);
+    background: rgba(122,175,255,0.08);
+  }
+  .drop-zone .icon { font-size: 2.5rem; margin-bottom: 10px; }
+  .drop-zone .label { color: var(--muted); font-size: 0.9rem; }
+  .drop-zone .label strong { color: var(--accent); }
+  .drop-zone .file-info {
+    margin-top: 10px;
+    font-size: 0.85rem;
+    color: var(--success);
+    display: none;
+  }
+  .drop-zone input { display: none; }
+
+  /* Options */
+  .options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .options label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 6px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .options select {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.9rem;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .options select:focus { border-color: var(--accent); }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 32px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.1s;
+    width: 100%;
+    justify-content: center;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn:active { transform: scale(0.98); }
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  /* Progress */
+  .progress-area {
+    display: none;
+    margin-top: 24px;
+    padding: 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .progress-area .status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.9rem;
+  }
+  .spinner {
+    width: 20px; height: 20px;
+    border: 3px solid rgba(122,175,255,0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Results */
+  .results {
+    display: none;
+    margin-top: 24px;
+  }
+  .results-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .results-meta {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .meta-badge {
+    font-size: 0.75rem;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: rgba(122,175,255,0.1);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+  .tab {
+    padding: 8px 20px;
+    border: 1px solid var(--border);
+    border-radius: 8px 8px 0 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .tab.active {
+    background: var(--surface);
+    color: var(--accent);
+    border-bottom-color: var(--surface);
+  }
+  .tab-content {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 0 10px 10px 10px;
+    padding: 20px;
+    position: relative;
+  }
+  .transcript-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.9rem;
+    line-height: 1.7;
+    max-height: 500px;
+    overflow-y: auto;
+    color: #ddd;
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .btn-sm {
+    padding: 8px 16px;
+    font-size: 0.82rem;
+    border-radius: 6px;
+    background: rgba(122,175,255,0.12);
+    color: var(--accent);
+    border: 1px solid rgba(122,175,255,0.2);
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.2s;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn-sm:hover {
+    background: rgba(122,175,255,0.2);
+    border-color: var(--accent);
+  }
+
+  /* History */
+  .history {
+    margin-top: 40px;
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+  }
+  .history-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .history-item:hover { border-color: var(--accent); }
+  .history-item .name { flex: 1; font-size: 0.88rem; }
+  .history-item .info { font-size: 0.75rem; color: var(--muted); }
+
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    padding: 12px 20px;
+    background: var(--success);
+    color: #000;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.3s;
+    pointer-events: none;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+
+  .formats {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  @media (max-width: 600px) {
+    .container { padding: 16px 12px; }
+    .options { grid-template-columns: 1fr; }
+    .drop-zone { padding: 32px 16px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <span class="brand">Audio2Text</span>
+  <span class="version">v{{ version }}</span>
+  <a class="back" href="/">&#8592; Landing</a>
+</nav>
+
+<div class="container">
+  <h2>Transcriu àudio a text amb Whisper</h2>
+
+  <div class="drop-zone" id="dropZone">
+    <div class="icon">&#127911;</div>
+    <div class="label">Arrossega un fitxer d'àudio o <strong>fes clic</strong></div>
+    <div class="formats">MP3, WAV, M4A, OGG, FLAC, WebM, AAC, OPUS, WMA</div>
+    <div class="file-info" id="fileInfo"></div>
+    <input type="file" id="fileInput" accept=".mp3,.wav,.m4a,.ogg,.flac,.webm,.wma,.aac,.opus">
+  </div>
+
+  <div class="options">
+    <div>
+      <label>Model Whisper</label>
+      <select id="modelSelect">
+        {% for m in models %}
+        <option value="{{ m }}" {% if m == 'base' %}selected{% endif %}>
+          {{ m }}{% if m == 'tiny' %} (ràpid){% elif m == 'base' %} (recomanat){% elif m == 'large' %} (lent, millor qualitat){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Idioma</label>
+      <select id="langSelect">
+        <option value="auto">Auto-detectar</option>
+        <option value="ca">Català</option>
+        <option value="es">Castellà</option>
+        <option value="en">Anglès</option>
+        <option value="fr">Francès</option>
+        <option value="de">Alemany</option>
+        <option value="it">Italià</option>
+        <option value="pt">Portuguès</option>
+        <option value="ja">Japonès</option>
+        <option value="zh">Xinès</option>
+      </select>
+    </div>
+  </div>
+
+  <button class="btn" id="btnTranscribe" disabled>
+    <span>&#9654;</span> Transcriure
+  </button>
+
+  <div class="progress-area" id="progressArea">
+    <div class="status">
+      <div class="spinner"></div>
+      <span id="statusMsg">Iniciant...</span>
+    </div>
+  </div>
+
+  <div class="results" id="results">
+    <div class="results-header">
+      <div class="results-meta">
+        <span class="meta-badge" id="metaLang"></span>
+        <span class="meta-badge" id="metaDuration"></span>
+        <span class="meta-badge" id="metaChars"></span>
+        <span class="meta-badge" id="metaSegments"></span>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="text">Text</button>
+      <button class="tab" data-tab="srt">SRT (timestamps)</button>
+    </div>
+
+    <div class="tab-content">
+      <div class="transcript-text" id="tabText"></div>
+      <div class="transcript-text" id="tabSrt" style="display:none;font-family:monospace;font-size:0.82rem"></div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-sm" id="btnCopy">&#128203; Copiar text</button>
+      <a class="btn-sm" id="btnDownloadTxt" download>&#8615; Descarregar .txt</a>
+      <a class="btn-sm" id="btnDownloadSrt" download>&#8615; Descarregar .srt</a>
+    </div>
+  </div>
+
+  <div class="history" id="historyArea" style="display:none">
+    <h2>Historial</h2>
+    <div id="historyList"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const dropZone = $('dropZone');
+const fileInput = $('fileInput');
+const fileInfo = $('fileInfo');
+const btn = $('btnTranscribe');
+let selectedFile = null;
+
+// Drop zone
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => { if (fileInput.files.length) setFile(fileInput.files[0]); });
+
+function setFile(f) {
+  selectedFile = f;
+  const sizeMB = (f.size / 1024 / 1024).toFixed(1);
+  fileInfo.textContent = `${f.name} (${sizeMB} MB)`;
+  fileInfo.style.display = 'block';
+  btn.disabled = false;
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    $('tabText').style.display = tab.dataset.tab === 'text' ? 'block' : 'none';
+    $('tabSrt').style.display = tab.dataset.tab === 'srt' ? 'block' : 'none';
+  });
+});
+
+// Transcribe
+btn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+
+  btn.disabled = true;
+  $('progressArea').style.display = 'block';
+  $('results').style.display = 'none';
+  $('statusMsg').textContent = 'Pujant fitxer...';
+
+  const form = new FormData();
+  form.append('audio', selectedFile);
+  form.append('model', $('modelSelect').value);
+  form.append('language', $('langSelect').value);
+
+  try {
+    const res = await fetch('/transcribe', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    listenSSE(data.job_id);
+  } catch (e) {
+    $('statusMsg').textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+  }
+});
+
+function listenSSE(jobId) {
+  const es = new EventSource(`/stream/${jobId}`);
+
+  es.addEventListener('status', e => {
+    const d = JSON.parse(e.data);
+    $('statusMsg').textContent = d.msg;
+  });
+
+  es.addEventListener('done', e => {
+    es.close();
+    const d = JSON.parse(e.data);
+    showResults(d, jobId);
+    $('progressArea').style.display = 'none';
+    btn.disabled = false;
+    loadHistory();
+  });
+
+  es.addEventListener('error', e => {
+    if (e.data) {
+      const d = JSON.parse(e.data);
+      $('statusMsg').textContent = 'Error: ' + d.msg;
+    }
+    es.close();
+    btn.disabled = false;
+  });
+}
+
+function showResults(d, jobId) {
+  $('results').style.display = 'block';
+  $('metaLang').textContent = 'Idioma: ' + d.language;
+  $('metaDuration').textContent = 'Temps: ' + d.duration;
+  $('metaChars').textContent = d.chars.toLocaleString() + ' caràcters';
+  $('metaSegments').textContent = d.segments + ' segments';
+  $('tabText').textContent = d.text;
+  $('tabSrt').textContent = d.srt;
+  $('btnDownloadTxt').href = `/download/${jobId}/txt`;
+  $('btnDownloadSrt').href = `/download/${jobId}/srt`;
+
+  // Reset to text tab
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('.tab[data-tab="text"]').classList.add('active');
+  $('tabText').style.display = 'block';
+  $('tabSrt').style.display = 'none';
+}
+
+// Copy
+$('btnCopy').addEventListener('click', () => {
+  const text = $('tabText').textContent;
+  navigator.clipboard.writeText(text).then(() => toast('Copiat al portapapers!'));
+});
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+// History
+async function loadHistory() {
+  try {
+    const res = await fetch('/history');
+    const items = await res.json();
+    const area = $('historyArea');
+    const list = $('historyList');
+    if (items.length === 0) { area.style.display = 'none'; return; }
+    area.style.display = 'block';
+    list.innerHTML = items.map(it => `
+      <div class="history-item" onclick="loadJob('${it.id}')">
+        <span class="name">${it.filename}</span>
+        <span class="info">${it.model} · ${it.language} · ${it.chars.toLocaleString()} chars · ${it.duration}</span>
+      </div>
+    `).join('');
+  } catch(e) {}
+}
+
+async function loadJob(id) {
+  try {
+    const res = await fetch(`/job/${id}`);
+    const data = await res.json();
+    if (data.status === 'done') showResults(data.result, id);
+  } catch(e) {}
+}
+
+loadHistory();
+</script>
+
+</body>
+</html>
