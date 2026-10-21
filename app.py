@@ -31,9 +31,20 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
+
+# Approximate processing speed factors (audio_duration / processing_time)
+# Higher = faster. These are rough CPU estimates.
+MODEL_SPEED = {
+    "tiny": 12.0,
+    "base": 6.0,
+    "small": 2.5,
+    "medium": 1.2,
+    "large": 0.5,
+}
+API_SPEED = 3.0  # OpenAI API is quite fast
 
 # Detect if local Whisper is available
 HAS_LOCAL_WHISPER = False
@@ -72,17 +83,75 @@ def _format_duration(seconds: float) -> str:
     return f"{m}m {s}s"
 
 
+def _get_audio_duration(audio_path: str) -> float:
+    """Get audio duration in seconds using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_format", audio_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return float(data.get("format", {}).get("duration", 0))
+    except Exception:
+        pass
+    return 0
+
+
 def _emit(job_id: str, event: str, data: dict):
     if job_id in jobs and "queue" in jobs[job_id]:
         jobs[job_id]["queue"].put({"event": event, "data": data})
 
 
-def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: str):
+def _progress_ticker(job_id: str, audio_duration: float, speed_factor: float, phase: str):
+    """Emit progress events based on estimated processing speed."""
+    if audio_duration <= 0:
+        return
+
+    estimated_time = audio_duration / speed_factor
+    t0 = time.time()
+    last_pct = 0
+
+    while job_id in jobs and jobs[job_id]["status"] == "running":
+        elapsed = time.time() - t0
+        pct = min(95, int(elapsed / estimated_time * 100))
+
+        if pct > last_pct:
+            last_pct = pct
+            remaining = max(0, estimated_time - elapsed)
+            eta = _format_duration(remaining) if remaining > 5 else "pocs segons"
+            _emit(job_id, "progress", {
+                "pct": pct,
+                "msg": f"{phase}... {pct}% (queden ~{eta})",
+            })
+
+        time.sleep(2)
+
+
+def _start_progress(job_id: str, audio_duration: float, speed_factor: float, phase: str):
+    """Start a background progress ticker thread."""
+    t = threading.Thread(
+        target=_progress_ticker,
+        args=(job_id, audio_duration, speed_factor, phase),
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
+def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: str,
+                       audio_duration: float):
     """Transcribe using local Whisper model."""
     _emit(job_id, "status", {"msg": f"Carregant model Whisper local '{model_name}'..."})
     model = whisper.load_model(model_name, device="cpu")
 
-    _emit(job_id, "status", {"msg": "Transcrivint amb Whisper local..."})
+    speed = MODEL_SPEED.get(model_name, 5.0)
+    _emit(job_id, "progress", {
+        "pct": 0,
+        "msg": f"Transcrivint amb Whisper local ({_format_duration(audio_duration)} d'àudio)...",
+    })
+    _start_progress(job_id, audio_duration, speed, "Transcrivint")
 
     transcribe_opts = {"verbose": False, "fp16": False}
     if language != "auto":
@@ -129,14 +198,18 @@ def _compress_for_api(job_id: str, audio_path: str) -> str:
     return compressed
 
 
-def _transcribe_api(job_id: str, audio_path: str, language: str):
+def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration: float):
     """Transcribe using OpenAI Whisper API."""
     import httpx
 
     audio_path = _compress_for_api(job_id, audio_path)
-    _emit(job_id, "status", {"msg": "Transcrivint amb OpenAI Whisper API..."})
 
-    # Transcription request
+    _emit(job_id, "progress", {
+        "pct": 0,
+        "msg": f"Enviant a l'API d'OpenAI ({_format_duration(audio_duration)} d'àudio)...",
+    })
+    _start_progress(job_id, audio_duration, API_SPEED, "Transcrivint via API")
+
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
 
     with open(audio_path, "rb") as af:
@@ -165,7 +238,6 @@ def _transcribe_api(job_id: str, audio_path: str, language: str):
     detected_lang = result.get("language", "unknown")
     segments = result.get("segments", [])
 
-    # Build SRT from API segments
     srt_lines = []
     for i, seg in enumerate(segments, 1):
         start = _format_srt_time(seg.get("start", 0))
@@ -179,14 +251,22 @@ def _transcribe_api(job_id: str, audio_path: str, language: str):
 
 def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: str):
     try:
+        # Get audio duration for progress estimation
+        audio_duration = _get_audio_duration(audio_path)
+        if audio_duration > 0:
+            _emit(job_id, "info", {
+                "audio_duration": _format_duration(audio_duration),
+                "audio_seconds": round(audio_duration),
+            })
+
         t0 = time.time()
 
         if HAS_LOCAL_WHISPER:
             full_text, srt_content, detected_lang, num_segments, backend = \
-                _transcribe_local(job_id, audio_path, model_name, language)
+                _transcribe_local(job_id, audio_path, model_name, language, audio_duration)
         elif OPENAI_API_KEY:
             full_text, srt_content, detected_lang, num_segments, backend = \
-                _transcribe_api(job_id, audio_path, language)
+                _transcribe_api(job_id, audio_path, language, audio_duration)
         else:
             raise RuntimeError(
                 "Ni Whisper local ni OPENAI_API_KEY disponibles. "
