@@ -318,6 +318,9 @@
 <nav>
   <span class="brand">Audio2Text</span>
   <span class="version">v{{ version }}</span>
+  <span class="version" style="margin-left:8px;padding:3px 8px;border-radius:4px;background:{% if backend == 'local' %}rgba(45,212,191,0.15);color:#2dd4bf{% elif backend == 'api' %}rgba(122,175,255,0.15);color:#7aafff{% else %}rgba(233,69,96,0.15);color:#e94560{% endif %}">
+    {% if backend == 'local' %}Whisper local{% elif backend == 'api' %}OpenAI API{% else %}Sense backend{% endif %}
+  </span>
   <a class="back" href="/">&#8592; Landing</a>
 </nav>
 
@@ -333,8 +336,8 @@
   </div>
 
   <div class="options">
-    <div>
-      <label>Model Whisper</label>
+    <div {% if not has_local %}style="opacity:0.4;pointer-events:none" title="Només disponible amb Whisper local"{% endif %}>
+      <label>Model Whisper {% if not has_local %}(no disponible){% endif %}</label>
       <select id="modelSelect">
         {% for m in models %}
         <option value="{{ m }}" {% if m == 'base' %}selected{% endif %}>

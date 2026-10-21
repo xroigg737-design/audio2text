@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Audio2Text - Transcribe audio files to text using OpenAI Whisper (local)."""
+"""Audio2Text - Transcribe audio files to text.
+
+Uses local Whisper when available, falls back to OpenAI Whisper API.
+"""
 
 import json
 import os
@@ -11,8 +14,11 @@ from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+from dotenv import load_dotenv
 from flask import (Flask, Response, jsonify, render_template, request,
                    send_from_directory)
+
+load_dotenv()
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
@@ -22,8 +28,17 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", ".aac", ".opus"}
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
+
+# Detect if local Whisper is available
+HAS_LOCAL_WHISPER = False
+try:
+    import whisper
+    HAS_LOCAL_WHISPER = True
+except ImportError:
+    pass
 
 jobs: dict[str, dict] = {}
 
@@ -59,33 +74,95 @@ def _emit(job_id: str, event: str, data: dict):
         jobs[job_id]["queue"].put({"event": event, "data": data})
 
 
+def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: str):
+    """Transcribe using local Whisper model."""
+    _emit(job_id, "status", {"msg": f"Carregant model Whisper local '{model_name}'..."})
+    model = whisper.load_model(model_name, device="cpu")
+
+    _emit(job_id, "status", {"msg": "Transcrivint amb Whisper local..."})
+
+    transcribe_opts = {"verbose": False, "fp16": False}
+    if language != "auto":
+        transcribe_opts["language"] = language
+
+    result = model.transcribe(audio_path, **transcribe_opts)
+
+    detected_lang = result.get("language", "unknown")
+    full_text = result["text"].strip()
+    segments = result.get("segments", [])
+    srt_content = _generate_srt(segments)
+
+    return full_text, srt_content, detected_lang, len(segments), "local"
+
+
+def _transcribe_api(job_id: str, audio_path: str, language: str):
+    """Transcribe using OpenAI Whisper API."""
+    import httpx
+
+    _emit(job_id, "status", {"msg": "Transcrivint amb OpenAI Whisper API..."})
+
+    # Transcription request
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+
+    with open(audio_path, "rb") as af:
+        files = {"file": (Path(audio_path).name, af, "audio/mpeg")}
+        data = {
+            "model": "whisper-1",
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "segment",
+        }
+        if language != "auto":
+            data["language"] = language
+
+        resp = httpx.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=600,
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"API error ({resp.status_code}): {resp.text[:300]}")
+
+    result = resp.json()
+    full_text = result.get("text", "").strip()
+    detected_lang = result.get("language", "unknown")
+    segments = result.get("segments", [])
+
+    # Build SRT from API segments
+    srt_lines = []
+    for i, seg in enumerate(segments, 1):
+        start = _format_srt_time(seg.get("start", 0))
+        end = _format_srt_time(seg.get("end", 0))
+        text = seg.get("text", "").strip()
+        srt_lines.append(f"{i}\n{start} --> {end}\n{text}\n")
+    srt_content = "\n".join(srt_lines)
+
+    return full_text, srt_content, detected_lang, len(segments), "api"
+
+
 def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: str):
     try:
-        _emit(job_id, "status", {"msg": f"Carregant model Whisper '{model_name}'..."})
-        import whisper
-        model = whisper.load_model(model_name, device="cpu")
-
-        _emit(job_id, "status", {"msg": "Transcrivint àudio (això pot trigar una estona)..."})
         t0 = time.time()
 
-        transcribe_opts = {"verbose": False, "fp16": False}
-        if language != "auto":
-            transcribe_opts["language"] = language
+        if HAS_LOCAL_WHISPER:
+            full_text, srt_content, detected_lang, num_segments, backend = \
+                _transcribe_local(job_id, audio_path, model_name, language)
+        elif OPENAI_API_KEY:
+            full_text, srt_content, detected_lang, num_segments, backend = \
+                _transcribe_api(job_id, audio_path, language)
+        else:
+            raise RuntimeError(
+                "Ni Whisper local ni OPENAI_API_KEY disponibles. "
+                "Instal·la openai-whisper o configura OPENAI_API_KEY."
+            )
 
-        result = model.transcribe(audio_path, **transcribe_opts)
         elapsed = time.time() - t0
 
-        detected_lang = result.get("language", "unknown")
-        full_text = result["text"].strip()
-        segments = result.get("segments", [])
-        srt_content = _generate_srt(segments)
-
         job_dir = Path(audio_path).parent
-        txt_path = job_dir / "transcript.txt"
-        srt_path = job_dir / "transcript.srt"
-
-        txt_path.write_text(full_text, encoding="utf-8")
-        srt_path.write_text(srt_content, encoding="utf-8")
+        (job_dir / "transcript.txt").write_text(full_text, encoding="utf-8")
+        (job_dir / "transcript.srt").write_text(srt_content, encoding="utf-8")
 
         jobs[job_id]["status"] = "done"
         jobs[job_id]["result"] = {
@@ -94,7 +171,8 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
             "language": detected_lang,
             "duration": _format_duration(elapsed),
             "chars": len(full_text),
-            "segments": len(segments),
+            "segments": num_segments,
+            "backend": backend,
         }
 
         _emit(job_id, "done", jobs[job_id]["result"])
@@ -107,7 +185,14 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
 
 @app.route("/")
 def index():
-    return render_template("index.html", version=APP_VERSION, models=WHISPER_MODELS)
+    backend = "local" if HAS_LOCAL_WHISPER else ("api" if OPENAI_API_KEY else "none")
+    return render_template(
+        "index.html",
+        version=APP_VERSION,
+        models=WHISPER_MODELS,
+        backend=backend,
+        has_local=HAS_LOCAL_WHISPER,
+    )
 
 
 @app.route("/transcribe", methods=["POST"])
@@ -211,9 +296,12 @@ def history():
                 "language": job["result"].get("language", ""),
                 "chars": job["result"].get("chars", 0),
                 "duration": job["result"].get("duration", ""),
+                "backend": job["result"].get("backend", ""),
             })
     return jsonify(items)
 
 
 if __name__ == "__main__":
+    print(f"Audio2Text v{APP_VERSION}")
+    print(f"Backend: {'Whisper local' if HAS_LOCAL_WHISPER else 'OpenAI API' if OPENAI_API_KEY else 'CAP (configura Whisper o OPENAI_API_KEY)'}")
     app.run(host="0.0.0.0", port=5070, debug=True)
