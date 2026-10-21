@@ -304,4 +304,4 @@ def history():
 if __name__ == "__main__":
     print(f"Audio2Text v{APP_VERSION}")
     print(f"Backend: {'Whisper local' if HAS_LOCAL_WHISPER else 'OpenAI API' if OPENAI_API_KEY else 'CAP (configura Whisper o OPENAI_API_KEY)'}")
-    app.run(host="0.0.0.0", port=5070, debug=True)
+    app.run(host="0.0.0.0", port=5071, debug=False)
