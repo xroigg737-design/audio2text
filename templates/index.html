@@ -411,6 +411,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
+const BASE = window.location.pathname.replace(/\/$/, '');
 const dropZone = $('dropZone');
 const fileInput = $('fileInput');
 const fileInfo = $('fileInfo');
@@ -461,7 +462,7 @@ btn.addEventListener('click', async () => {
   form.append('language', $('langSelect').value);
 
   try {
-    const res = await fetch('/transcribe', { method: 'POST', body: form });
+    const res = await fetch(`${BASE}/transcribe`, { method: 'POST', body: form });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     listenSSE(data.job_id);
@@ -472,7 +473,7 @@ btn.addEventListener('click', async () => {
 });
 
 function listenSSE(jobId) {
-  const es = new EventSource(`/stream/${jobId}`);
+  const es = new EventSource(`${BASE}/stream/${jobId}`);
 
   es.addEventListener('status', e => {
     const d = JSON.parse(e.data);
@@ -506,8 +507,8 @@ function showResults(d, jobId) {
   $('metaSegments').textContent = d.segments + ' segments';
   $('tabText').textContent = d.text;
   $('tabSrt').textContent = d.srt;
-  $('btnDownloadTxt').href = `/download/${jobId}/txt`;
-  $('btnDownloadSrt').href = `/download/${jobId}/srt`;
+  $('btnDownloadTxt').href = `${BASE}/download/${jobId}/txt`;
+  $('btnDownloadSrt').href = `${BASE}/download/${jobId}/srt`;
 
   // Reset to text tab
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -532,7 +533,7 @@ function toast(msg) {
 // History
 async function loadHistory() {
   try {
-    const res = await fetch('/history');
+    const res = await fetch(`${BASE}/history`);
     const items = await res.json();
     const area = $('historyArea');
     const list = $('historyList');
@@ -549,7 +550,7 @@ async function loadHistory() {
 
 async function loadJob(id) {
   try {
-    const res = await fetch(`/job/${id}`);
+    const res = await fetch(`${BASE}/job/${id}`);
     const data = await res.json();
     if (data.status === 'done') showResults(data.result, id);
   } catch(e) {}
