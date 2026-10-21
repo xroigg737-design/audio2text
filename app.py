@@ -7,6 +7,7 @@ Uses local Whisper when available, falls back to OpenAI Whisper API.
 import json
 import os
 import queue
+import subprocess
 import threading
 import time
 import uuid
@@ -30,7 +31,9 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
+
+OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
 # Detect if local Whisper is available
 HAS_LOCAL_WHISPER = False
@@ -95,10 +98,42 @@ def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: s
     return full_text, srt_content, detected_lang, len(segments), "local"
 
 
+def _compress_for_api(job_id: str, audio_path: str) -> str:
+    """Compress audio to under 25 MB for the OpenAI API. Returns path to use."""
+    file_size = os.path.getsize(audio_path)
+    if file_size <= OPENAI_MAX_BYTES:
+        return audio_path
+
+    _emit(job_id, "status", {
+        "msg": f"Fitxer massa gran per l'API ({file_size // 1024 // 1024} MB). Comprimint..."
+    })
+
+    compressed = str(Path(audio_path).parent / "compressed.mp3")
+    target_bitrate = max(32, int(OPENAI_MAX_BYTES * 8 / (file_size / 48000) / 1000))
+    target_bitrate = min(target_bitrate, 64)
+
+    cmd = [
+        "ffmpeg", "-y", "-i", audio_path,
+        "-vn", "-ac", "1", "-ar", "16000",
+        "-b:a", f"{target_bitrate}k",
+        compressed,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg error: {result.stderr[:200]}")
+
+    new_size = os.path.getsize(compressed)
+    _emit(job_id, "status", {
+        "msg": f"Comprimit a {new_size // 1024 // 1024} MB. Enviant a l'API..."
+    })
+    return compressed
+
+
 def _transcribe_api(job_id: str, audio_path: str, language: str):
     """Transcribe using OpenAI Whisper API."""
     import httpx
 
+    audio_path = _compress_for_api(job_id, audio_path)
     _emit(job_id, "status", {"msg": "Transcrivint amb OpenAI Whisper API..."})
 
     # Transcription request
