@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -751,52 +751,78 @@ def _generate_pdf(job_id: str):
     return send_file(str(pdf_path), as_attachment=True, download_name=download_name)
 
 
-NOTES_SYSTEM_PROMPT = """Ets un analista expert que genera informes EXHAUSTIUS i DETALLATS a partir de transcripcions.
-El teu objectiu és extreure TOTA la informació rellevant, no resumir. Vols que algú que no hagi estat a la reunió entengui completament tot el que s'ha parlat.
+NOTES_SYSTEM_PROMPT = """Ets un analista sènior que crea informes de KNOWLEDGE TRANSFER exhaustius.
+La teva feina NO és resumir. La teva feina és EXTREURE I DOCUMENTAR absolutament tot el que es diu a la conversa perquè serveixi com a referència completa.
+
+REGLES CRÍTIQUES:
+- Si es menciona un nom (persona, empresa, tecnologia, lloc), HA d'aparèixer al teu informe
+- Si es menciona un número, dada, pressupost, quantitat, HA d'aparèixer
+- Si s'explica una situació, problema o anècdota, HA d'aparèixer amb detall
+- NO facis paràfrasis curtes. Explica cada punt amb el detall suficient perquè algú que no hi era ho entengui
+- Cada secció ha de tenir TOTES les entrades que corresponguin, no un resum de les "principals"
+- Les cites textuals han de ser frases reals i reveladores de la conversa, no genèriques
+
 Genera els apunts en el MATEIX IDIOMA que la transcripció.
-Retorna NOMÉS un JSON vàlid (sense markdown, sense ```json) amb aquesta estructura:
+
+Retorna NOMÉS un JSON vàlid (sense markdown, sense ```json):
 {
   "title": "Títol descriptiu",
-  "summary": "Resum executiu de 4-6 frases cobrint tots els temes principals tractats",
+  "summary": "Resum executiu complet (8-12 frases) que cobreixi TOTS els grans blocs temàtics tractats",
   "participants": [
-    {"name": "Nom", "role": "Rol o càrrec si es menciona", "context": "Breu context sobre la persona"}
+    {"name": "Nom", "role": "Rol/càrrec", "context": "Context detallat: què fa, com es relaciona, què opina"}
+  ],
+  "people_mentioned": [
+    {"name": "Nom", "role": "Rol", "context": "Per què es menciona, què es diu d'aquesta persona"}
   ],
   "topics": [
     {
-      "title": "Tema tractat",
-      "summary": "Explicació detallada del que s'ha dit sobre aquest tema (3-5 frases mínim)",
-      "subtopics": ["Subtema 1", "Subtema 2"],
-      "key_facts": ["Fet concret 1", "Fet concret 2"]
+      "title": "Tema",
+      "summary": "Explicació DETALLADA de tot el que s'ha dit sobre aquest tema (mínim 5-8 frases). Inclou context, situació actual, problemes, opinions expressades i matisos",
+      "subtopics": ["Subtema específic 1", "Subtema específic 2"],
+      "key_facts": ["Fet concret i específic 1", "Fet concret i específic 2", "Fet concret 3"]
     }
   ],
   "platforms_and_technologies": [
-    {"name": "Nom plataforma/tecnologia", "context": "Com s'utilitza, estat actual, problemes o plans", "status": "actiu/en migració/pendent/problema"}
+    {"name": "Nom EXACTE", "category": "ERP/Cloud/Infra/Security/Comms/BI/Mail/etc", "context": "Descripció detallada: per a què serveix, qui l'usa, estat, problemes, plans de futur", "status": "actiu/en migració/pendent/problema/obsolet"}
   ],
   "providers_and_services": [
-    {"name": "Proveïdor o servei", "details": "Què ofereix, relació, estat", "sentiment": "positiu/neutre/negatiu/mixt"}
+    {"name": "Nom proveïdor", "service": "Servei concret que dóna", "details": "Relació, contracte, qualitat, experiència, problemes", "sentiment": "positiu/neutre/negatiu/mixt"}
   ],
   "locations_and_sites": [
-    {"name": "País/ciutat/workcenter", "context": "Què s'ha dit sobre aquesta ubicació"}
+    {"name": "País/ciutat/planta/workcenter", "context": "Tot el que s'ha dit: mida, equip, infraestructura, problemes, particularitats"}
+  ],
+  "team_and_organization": [
+    {"area": "Àrea o equip", "details": "Composició, responsables, estat, problemes, dinàmiques"}
   ],
   "strategies_and_plans": [
-    {"strategy": "Descripció de l'estratègia o pla", "rationale": "Per què es planteja", "timeline": "Termini si es menciona"}
+    {"strategy": "Estratègia o pla concret", "rationale": "Per què, motivació, context", "status": "en curs/planificat/ideat/urgent", "timeline": "Termini"}
   ],
   "problems_and_challenges": [
-    {"problem": "Descripció del problema", "impact": "Impacte o conseqüència", "proposed_solution": "Solució proposada si n'hi ha"}
+    {"problem": "Problema concret i específic", "impact": "Conseqüència real o potencial", "urgency": "alta/mitjana/baixa", "proposed_solution": "Solució proposada si n'hi ha"}
+  ],
+  "risks_and_warnings": [
+    {"risk": "Risc o advertència mencionada", "context": "Detall i context"}
   ],
   "decisions": ["Decisió concreta 1"],
   "action_items": [
     {"task": "Tasca", "owner": "Responsable", "priority": "alta/mitjana/baixa", "deadline": "Termini"}
   ],
   "numbers_and_data": [
-    {"metric": "Dada o xifra mencionada", "context": "En quin context s'ha dit"}
+    {"metric": "Dada/xifra/pressupost exacte", "context": "En quin context, què significa"}
+  ],
+  "contracts_and_costs": [
+    {"item": "Contracte/cost/pressupost", "details": "Import, termini, proveïdor, condicions"}
   ],
   "organizational_insights": [
-    {"insight": "Observació sobre l'organització, cultura, dinàmiques internes"}
+    {"insight": "Observació sobre cultura, política interna, dinàmiques de poder, relacions entre àrees"}
   ],
-  "quotes": ["Frase textual rellevant o reveladora"]
+  "quick_wins": [
+    {"action": "Acció ràpida amb impacte", "rationale": "Per què és un quick win"}
+  ],
+  "quotes": ["Frase TEXTUAL reveladora de la conversa - han de ser frases reals dites, no paràfrasis"]
 }
-IMPORTANT: Sigues EXHAUSTIU. Extreu TOTS els temes, TOTES les tecnologies, TOTS els proveïdors, TOTS els llocs que es mencionen. Millor pecar d'exhaustiu que de breu. Si algun camp no aplica, retorna []."""
+
+RECORDA: El teu objectiu és que aquest document sigui la REFERÈNCIA COMPLETA de tot el que s'ha parlat. Cada menció compta. Si dubtes entre incloure o no alguna cosa, INCLOU-LA."""
 
 
 @app.route("/generate-notes/<job_id>", methods=["POST"])
@@ -978,6 +1004,18 @@ def _generate_notes_pdf(job_id: str):
                 if ctx: line += f". {ctx}"
                 story.append(Paragraph(line, s_bullet))
 
+    people = notes.get("people_mentioned", [])
+    if people:
+        story.append(Paragraph("Persones mencionades", s_section))
+        for p in people:
+            if isinstance(p, str):
+                story.append(Paragraph(f"• {esc(p)}", s_bullet))
+            else:
+                line = f"<b>{esc(p.get('name', ''))}</b>"
+                if p.get("role"): line += f" — {esc(p['role'])}"
+                if p.get("context"): line += f". {esc(p['context'])}"
+                story.append(Paragraph(line, s_bullet))
+
     topics = notes.get("topics", [])
     if topics:
         story.append(Paragraph("Temes tractats", s_section))
@@ -1023,6 +1061,14 @@ def _generate_notes_pdf(job_id: str):
                 f"<b>{esc(loc.get('name', ''))}</b>: {esc(loc.get('context', ''))}",
                 s_bullet))
 
+    teams = notes.get("team_and_organization", [])
+    if teams:
+        story.append(Paragraph("Equip i Organització", s_section))
+        for t in teams:
+            story.append(Paragraph(
+                f"<b>{esc(t.get('area', ''))}</b>: {esc(t.get('details', ''))}",
+                s_bullet))
+
     strategies = notes.get("strategies_and_plans", [])
     if strategies:
         story.append(Paragraph("Estratègies i Plans", s_section))
@@ -1041,12 +1087,28 @@ def _generate_notes_pdf(job_id: str):
             if sol: line += f". Solució: {esc(sol)}"
             story.append(Paragraph(line, s_bullet))
 
+    risks = notes.get("risks_and_warnings", [])
+    if risks:
+        story.append(Paragraph("Riscos i Advertències", s_section))
+        for r in risks:
+            story.append(Paragraph(
+                f"<b>{esc(r.get('risk', ''))}</b>: {esc(r.get('context', ''))}",
+                s_bullet))
+
     numbers = notes.get("numbers_and_data", [])
     if numbers:
         story.append(Paragraph("Dades i Xifres", s_section))
         for d in numbers:
             story.append(Paragraph(
                 f"<b>{esc(d.get('metric', ''))}</b>: {esc(d.get('context', ''))}",
+                s_bullet))
+
+    contracts = notes.get("contracts_and_costs", [])
+    if contracts:
+        story.append(Paragraph("Contractes i Costos", s_section))
+        for c in contracts:
+            story.append(Paragraph(
+                f"<b>{esc(c.get('item', ''))}</b>: {esc(c.get('details', ''))}",
                 s_bullet))
 
     decisions = notes.get("decisions", [])
@@ -1077,6 +1139,14 @@ def _generate_notes_pdf(job_id: str):
         for i in insights:
             txt = i.get("insight", "") if isinstance(i, dict) else str(i)
             story.append(Paragraph(f"• {esc(txt)}", s_bullet))
+
+    quick_wins = notes.get("quick_wins", [])
+    if quick_wins:
+        story.append(Paragraph("Quick Wins", s_section))
+        for q in quick_wins:
+            story.append(Paragraph(
+                f"<b>{esc(q.get('action', ''))}</b>: {esc(q.get('rationale', ''))}",
+                s_bullet))
 
     quotes = notes.get("quotes", [])
     if quotes:

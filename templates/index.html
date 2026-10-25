@@ -855,6 +855,14 @@ function renderNotes(n) {
     html += `</ul></div>`;
   }
 
+  if (n.people_mentioned && n.people_mentioned.length) {
+    html += `<div class="notes-section"><h4>Persones mencionades</h4><ul>`;
+    n.people_mentioned.forEach(p => {
+      html += `<li><strong>${esc(p.name)}</strong>${p.role ? ' — ' + esc(p.role) : ''}${p.context ? '. ' + esc(p.context) : ''}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
   if (n.topics && n.topics.length) {
     html += `<div class="notes-section"><h4>Temes tractats</h4>`;
     n.topics.forEach(t => {
@@ -895,6 +903,14 @@ function renderNotes(n) {
     html += `</ul></div>`;
   }
 
+  if (n.team_and_organization && n.team_and_organization.length) {
+    html += `<div class="notes-section"><h4>Equip i Organització</h4><ul>`;
+    n.team_and_organization.forEach(t => {
+      html += `<li><strong>${esc(t.area)}</strong>: ${esc(t.details)}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
   if (n.strategies_and_plans && n.strategies_and_plans.length) {
     html += `<div class="notes-section"><h4>Estratègies i Plans</h4><ul>`;
     n.strategies_and_plans.forEach(s => {
@@ -911,10 +927,26 @@ function renderNotes(n) {
     html += `</ul></div>`;
   }
 
+  if (n.risks_and_warnings && n.risks_and_warnings.length) {
+    html += `<div class="notes-section"><h4>Riscos i Advertències</h4><ul>`;
+    n.risks_and_warnings.forEach(r => {
+      html += `<li><strong>${esc(r.risk)}</strong>: ${esc(r.context)}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
   if (n.numbers_and_data && n.numbers_and_data.length) {
     html += `<div class="notes-section"><h4>Dades i Xifres</h4><ul>`;
     n.numbers_and_data.forEach(d => {
       html += `<li><strong>${esc(d.metric)}</strong>: ${esc(d.context)}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
+  if (n.contracts_and_costs && n.contracts_and_costs.length) {
+    html += `<div class="notes-section"><h4>Contractes i Costos</h4><ul>`;
+    n.contracts_and_costs.forEach(c => {
+      html += `<li><strong>${esc(c.item)}</strong>: ${esc(c.details)}</li>`;
     });
     html += `</ul></div>`;
   }
@@ -938,6 +970,14 @@ function renderNotes(n) {
     html += `<div class="notes-section"><h4>Observacions organitzatives</h4><ul>`;
     n.organizational_insights.forEach(i => {
       html += `<li>${esc(typeof i === 'string' ? i : i.insight)}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
+  if (n.quick_wins && n.quick_wins.length) {
+    html += `<div class="notes-section"><h4>Quick Wins</h4><ul>`;
+    n.quick_wins.forEach(q => {
+      html += `<li><strong>${esc(q.action)}</strong>: ${esc(q.rationale)}</li>`;
     });
     html += `</ul></div>`;
   }
