@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "2.8"
+APP_VERSION = "2.9"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -866,17 +866,27 @@ def generate_notes(job_id):
                     {"role": "system", "content": NOTES_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
-                "max_completion_tokens": 16000,
+                "max_completion_tokens": 65000,
             },
             timeout=300,
         )
 
         if resp.status_code != 200:
+            print(f"[NOTES] API error {resp.status_code}: {resp.text[:500]}")
             return jsonify({"error": f"API error: {resp.text[:300]}"}), 500
 
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        # Save raw response for debugging
+        rjson = resp.json()
         job_dir = OUTPUT_DIR / job_id
+        # Save full API response for debugging
+        (job_dir / "notes_api_response.json").write_text(
+            json.dumps(rjson, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        msg = rjson["choices"][0]["message"]
+        raw = (msg.get("content") or "").strip()
+        print(f"[NOTES] content length={len(raw)}, keys={list(msg.keys())}")
+
+        # Save raw response for debugging
         (job_dir / "notes_raw.txt").write_text(raw, encoding="utf-8")
 
         # Extract JSON from response - reasoning models may wrap it
@@ -903,9 +913,13 @@ def generate_notes(job_id):
 
         return jsonify(notes)
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(f"[NOTES] JSON parse error: {e}")
+        print(f"[NOTES] Raw content (first 500): {raw[:500] if raw else 'EMPTY'}")
         return jsonify({"error": "L'IA no ha retornat un format vàlid. Torna a intentar-ho."}), 500
     except Exception as e:
+        import traceback
+        print(f"[NOTES] Exception: {traceback.format_exc()}")
         return jsonify({"error": str(e)}), 500
 
 
