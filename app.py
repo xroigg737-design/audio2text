@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -162,17 +162,18 @@ def _start_progress(job_id: str, audio_duration: float, speed_factor: float, pha
     return t
 
 
-def _preprocess_audio(job_id: str, audio_path: str) -> str:
+def _preprocess_audio(job_id: str, audio_path: str, audio_duration: float = 0) -> str:
     """Preprocess audio: normalize volume, reduce noise, convert to 16kHz mono WAV."""
     preprocessed = str(Path(audio_path).parent / "preprocessed.wav")
     _emit(job_id, "status", {"msg": "Preprocessant àudio (normalitzant volum, reduint soroll)..."})
+    timeout = max(180, int(audio_duration * 2) + 60)
     cmd = [
         "ffmpeg", "-y", "-i", audio_path,
         "-af", "highpass=f=80,lowpass=f=8000,afftdn=nf=-20,loudnorm=I=-16:TP=-1.5:LRA=11",
         "-ar", "16000", "-ac", "1",
         preprocessed,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         return audio_path
     return preprocessed
@@ -195,7 +196,7 @@ def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: s
     _emit(job_id, "status", {"msg": f"Carregant model '{model_name}' ({device_label})..."})
     model = _get_model(model_name)
 
-    processed_path = _preprocess_audio(job_id, audio_path)
+    processed_path = _preprocess_audio(job_id, audio_path, audio_duration)
 
     speed_table = MODEL_SPEED_GPU if DEVICE == "cuda" else MODEL_SPEED_CPU
     speed = speed_table.get(model_name, 5.0)
