@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "2.7"
+APP_VERSION = "2.8"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -874,9 +874,24 @@ def generate_notes(job_id):
         if resp.status_code != 200:
             return jsonify({"error": f"API error: {resp.text[:300]}"}), 500
 
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        # Save raw response for debugging
+        job_dir = OUTPUT_DIR / job_id
+        (job_dir / "notes_raw.txt").write_text(raw, encoding="utf-8")
+
+        # Extract JSON from response - reasoning models may wrap it
+        content = raw
+        if "```json" in content:
+            content = content.split("```json", 1)[1].rsplit("```", 1)[0].strip()
+        elif "```" in content:
+            content = content.split("```", 1)[1].rsplit("```", 1)[0].strip()
+
+        # Try to find JSON object if still not valid
+        if not content.startswith("{"):
+            start = content.find("{")
+            if start != -1:
+                end = content.rfind("}") + 1
+                content = content[start:end]
 
         notes = json.loads(content)
         jobs[job_id]["notes"] = notes
