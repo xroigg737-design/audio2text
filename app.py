@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -755,12 +755,17 @@ NOTES_SYSTEM_PROMPT = """Ets un analista sènior que crea informes de KNOWLEDGE 
 La teva feina NO és resumir. La teva feina és EXTREURE I DOCUMENTAR absolutament tot el que es diu a la conversa perquè serveixi com a referència completa.
 
 REGLES CRÍTIQUES:
+- MAI INVENTS res. NOMÉS extreu informació que apareix EXPLÍCITAMENT a la transcripció
+- Si un nom de tecnologia, empresa o persona NO es diu literalment al text, NO l'incloguis
+- NO assumeixis detalls basant-te en el que és comú a la indústria. Si no es diu, no hi és
+- Si no estàs 100% segur que alguna cosa es menciona, NO la posis
 - Si es menciona un nom (persona, empresa, tecnologia, lloc), HA d'aparèixer al teu informe
 - Si es menciona un número, dada, pressupost, quantitat, HA d'aparèixer
 - Si s'explica una situació, problema o anècdota, HA d'aparèixer amb detall
 - NO facis paràfrasis curtes. Explica cada punt amb el detall suficient perquè algú que no hi era ho entengui
 - Cada secció ha de tenir TOTES les entrades que corresponguin, no un resum de les "principals"
 - Les cites textuals han de ser frases reals i reveladores de la conversa, no genèriques
+- La transcripció pot tenir errors de reconeixement de veu (noms mal transcrits). Transcriu-los tal qual
 
 Genera els apunts en el MATEIX IDIOMA que la transcripció.
 
@@ -822,7 +827,12 @@ Retorna NOMÉS un JSON vàlid (sense markdown, sense ```json):
   "quotes": ["Frase TEXTUAL reveladora de la conversa - han de ser frases reals dites, no paràfrasis"]
 }
 
-RECORDA: El teu objectiu és que aquest document sigui la REFERÈNCIA COMPLETA de tot el que s'ha parlat. Cada menció compta. Si dubtes entre incloure o no alguna cosa, INCLOU-LA."""
+RECORDA:
+- El teu objectiu és que aquest document sigui la REFERÈNCIA COMPLETA de tot el que s'ha parlat
+- Cada menció compta. Si dubtes entre incloure o no alguna cosa que SÍ es diu, INCLOU-LA
+- Però si dubtes de si alguna cosa es diu o t'ho estàs inventant, NO LA POSIS
+- ZERO al·lucinacions. Preferible un informe incomplet que un informe amb informació falsa
+- Quan no estiguis segur d'un nom propi, posa-ho entre [claudàtors] indicant que pot ser un error de transcripció"""
 
 
 @app.route("/generate-notes/<job_id>", methods=["POST"])
@@ -855,7 +865,7 @@ def generate_notes(job_id):
                     {"role": "system", "content": NOTES_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
-                "temperature": 0.3,
+                "temperature": 0.1,
                 "max_tokens": 16000,
             },
             timeout=120,
