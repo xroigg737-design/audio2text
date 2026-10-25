@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -751,24 +751,52 @@ def _generate_pdf(job_id: str):
     return send_file(str(pdf_path), as_attachment=True, download_name=download_name)
 
 
-NOTES_SYSTEM_PROMPT = """Ets un assistent expert en generar apunts professionals i ben estructurats a partir de transcripcions d'àudio.
+NOTES_SYSTEM_PROMPT = """Ets un analista expert que genera informes EXHAUSTIUS i DETALLATS a partir de transcripcions.
+El teu objectiu és extreure TOTA la informació rellevant, no resumir. Vols que algú que no hagi estat a la reunió entengui completament tot el que s'ha parlat.
 Genera els apunts en el MATEIX IDIOMA que la transcripció.
-Retorna NOMÉS un JSON vàlid amb aquesta estructura exacta (sense markdown, sense ```json):
+Retorna NOMÉS un JSON vàlid (sense markdown, sense ```json) amb aquesta estructura:
 {
-  "title": "Títol descriptiu de la reunió/conversa",
-  "summary": "Resum executiu de 2-3 frases",
-  "participants": ["Nom1", "Nom2"],
-  "key_points": [
-    {"topic": "Tema", "details": "Detalls del punt"}
+  "title": "Títol descriptiu",
+  "summary": "Resum executiu de 4-6 frases cobrint tots els temes principals tractats",
+  "participants": [
+    {"name": "Nom", "role": "Rol o càrrec si es menciona", "context": "Breu context sobre la persona"}
   ],
-  "decisions": ["Decisió 1", "Decisió 2"],
+  "topics": [
+    {
+      "title": "Tema tractat",
+      "summary": "Explicació detallada del que s'ha dit sobre aquest tema (3-5 frases mínim)",
+      "subtopics": ["Subtema 1", "Subtema 2"],
+      "key_facts": ["Fet concret 1", "Fet concret 2"]
+    }
+  ],
+  "platforms_and_technologies": [
+    {"name": "Nom plataforma/tecnologia", "context": "Com s'utilitza, estat actual, problemes o plans", "status": "actiu/en migració/pendent/problema"}
+  ],
+  "providers_and_services": [
+    {"name": "Proveïdor o servei", "details": "Què ofereix, relació, estat", "sentiment": "positiu/neutre/negatiu/mixt"}
+  ],
+  "locations_and_sites": [
+    {"name": "País/ciutat/workcenter", "context": "Què s'ha dit sobre aquesta ubicació"}
+  ],
+  "strategies_and_plans": [
+    {"strategy": "Descripció de l'estratègia o pla", "rationale": "Per què es planteja", "timeline": "Termini si es menciona"}
+  ],
+  "problems_and_challenges": [
+    {"problem": "Descripció del problema", "impact": "Impacte o conseqüència", "proposed_solution": "Solució proposada si n'hi ha"}
+  ],
+  "decisions": ["Decisió concreta 1"],
   "action_items": [
-    {"task": "Tasca", "owner": "Responsable (si es menciona)", "deadline": "Termini (si es menciona)"}
+    {"task": "Tasca", "owner": "Responsable", "priority": "alta/mitjana/baixa", "deadline": "Termini"}
   ],
-  "open_issues": ["Tema pendent 1"],
-  "quotes": ["Frase rellevant textual entre cometes"]
+  "numbers_and_data": [
+    {"metric": "Dada o xifra mencionada", "context": "En quin context s'ha dit"}
+  ],
+  "organizational_insights": [
+    {"insight": "Observació sobre l'organització, cultura, dinàmiques internes"}
+  ],
+  "quotes": ["Frase textual rellevant o reveladora"]
 }
-Si algun camp no aplica, retorna una llista buida []."""
+IMPORTANT: Sigues EXHAUSTIU. Extreu TOTS els temes, TOTES les tecnologies, TOTS els proveïdors, TOTS els llocs que es mencionen. Millor pecar d'exhaustiu que de breu. Si algun camp no aplica, retorna []."""
 
 
 @app.route("/generate-notes/<job_id>", methods=["POST"])
@@ -796,13 +824,13 @@ def generate_notes(job_id):
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             json={
-                "model": "gpt-4o-mini",
+                "model": "gpt-4o",
                 "messages": [
                     {"role": "system", "content": NOTES_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
                 "temperature": 0.3,
-                "max_tokens": 4000,
+                "max_tokens": 16000,
             },
             timeout=120,
         )
@@ -919,6 +947,17 @@ def _generate_notes_pdf(job_id: str):
     story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER,
                              spaceAfter=4*mm, spaceBefore=0))
 
+    TABLE_STYLE = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), PURPLE_BG),
+        ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, BORDER),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ])
+    col_w = page_w - 2 * margin
+
     summary = notes.get("summary", "")
     if summary:
         story.append(Paragraph("Resum executiu", s_section))
@@ -927,54 +966,117 @@ def _generate_notes_pdf(job_id: str):
     participants = notes.get("participants", [])
     if participants:
         story.append(Paragraph("Participants", s_section))
-        story.append(Paragraph(esc(" · ".join(participants)), s_body))
+        for p in participants:
+            if isinstance(p, str):
+                story.append(Paragraph(f"• {esc(p)}", s_bullet))
+            else:
+                name = esc(p.get("name", ""))
+                role = esc(p.get("role", ""))
+                ctx = esc(p.get("context", ""))
+                line = f"<b>{name}</b>"
+                if role: line += f" — {role}"
+                if ctx: line += f". {ctx}"
+                story.append(Paragraph(line, s_bullet))
 
-    key_points = notes.get("key_points", [])
-    if key_points:
-        story.append(Paragraph("Punts clau", s_section))
-        for kp in key_points:
-            topic = esc(kp.get("topic", ""))
-            details = esc(kp.get("details", ""))
-            story.append(Paragraph(f"<b>{topic}</b>: {details}", s_bullet))
+    topics = notes.get("topics", [])
+    if topics:
+        story.append(Paragraph("Temes tractats", s_section))
+        for t in topics:
+            story.append(Paragraph(f"<b>{esc(t.get('title', ''))}</b>", s_bullet))
+            story.append(Paragraph(esc(t.get("summary", "")), s_body))
+            for fact in t.get("key_facts", []):
+                story.append(Paragraph(f"  • {esc(fact)}", s_bullet))
+
+    platforms = notes.get("platforms_and_technologies", [])
+    if platforms:
+        story.append(Paragraph("Plataformes i Tecnologies", s_section))
+        rows = [[Paragraph("<b>Plataforma</b>", s_bullet),
+                 Paragraph("<b>Context</b>", s_bullet),
+                 Paragraph("<b>Estat</b>", s_bullet)]]
+        for p in platforms:
+            rows.append([Paragraph(esc(p.get("name", "")), s_bullet),
+                         Paragraph(esc(p.get("context", "")), s_bullet),
+                         Paragraph(esc(p.get("status", "")), s_bullet)])
+        t = Table(rows, colWidths=[col_w*0.25, col_w*0.55, col_w*0.20])
+        t.setStyle(TABLE_STYLE)
+        story.append(t)
+
+    providers = notes.get("providers_and_services", [])
+    if providers:
+        story.append(Paragraph("Proveïdors i Serveis", s_section))
+        rows = [[Paragraph("<b>Proveïdor</b>", s_bullet),
+                 Paragraph("<b>Detalls</b>", s_bullet),
+                 Paragraph("<b>Valoració</b>", s_bullet)]]
+        for p in providers:
+            rows.append([Paragraph(esc(p.get("name", "")), s_bullet),
+                         Paragraph(esc(p.get("details", "")), s_bullet),
+                         Paragraph(esc(p.get("sentiment", "")), s_bullet)])
+        t = Table(rows, colWidths=[col_w*0.25, col_w*0.55, col_w*0.20])
+        t.setStyle(TABLE_STYLE)
+        story.append(t)
+
+    locations = notes.get("locations_and_sites", [])
+    if locations:
+        story.append(Paragraph("Ubicacions i Sites", s_section))
+        for loc in locations:
+            story.append(Paragraph(
+                f"<b>{esc(loc.get('name', ''))}</b>: {esc(loc.get('context', ''))}",
+                s_bullet))
+
+    strategies = notes.get("strategies_and_plans", [])
+    if strategies:
+        story.append(Paragraph("Estratègies i Plans", s_section))
+        for s in strategies:
+            line = f"<b>{esc(s.get('strategy', ''))}</b>: {esc(s.get('rationale', ''))}"
+            tl = s.get("timeline", "")
+            if tl: line += f" — <i>{esc(tl)}</i>"
+            story.append(Paragraph(line, s_bullet))
+
+    problems = notes.get("problems_and_challenges", [])
+    if problems:
+        story.append(Paragraph("Problemes i Reptes", s_section))
+        for p in problems:
+            line = f"<b>{esc(p.get('problem', ''))}</b> — {esc(p.get('impact', ''))}"
+            sol = p.get("proposed_solution", "")
+            if sol: line += f". Solució: {esc(sol)}"
+            story.append(Paragraph(line, s_bullet))
+
+    numbers = notes.get("numbers_and_data", [])
+    if numbers:
+        story.append(Paragraph("Dades i Xifres", s_section))
+        for d in numbers:
+            story.append(Paragraph(
+                f"<b>{esc(d.get('metric', ''))}</b>: {esc(d.get('context', ''))}",
+                s_bullet))
 
     decisions = notes.get("decisions", [])
     if decisions:
-        story.append(Paragraph("Decisions preses", s_section))
+        story.append(Paragraph("Decisions", s_section))
         for d in decisions:
             story.append(Paragraph(f"• {esc(d)}", s_bullet))
 
     actions = notes.get("action_items", [])
     if actions:
         story.append(Paragraph("Accions pendents", s_section))
-        act_data = [
-            [Paragraph("<b>Tasca</b>", s_bullet),
-             Paragraph("<b>Responsable</b>", s_bullet),
-             Paragraph("<b>Termini</b>", s_bullet)],
-        ]
+        rows = [[Paragraph("<b>Tasca</b>", s_bullet),
+                 Paragraph("<b>Responsable</b>", s_bullet),
+                 Paragraph("<b>Prioritat</b>", s_bullet),
+                 Paragraph("<b>Termini</b>", s_bullet)]]
         for a in actions:
-            act_data.append([
-                Paragraph(esc(a.get("task", "")), s_bullet),
-                Paragraph(esc(a.get("owner", "-")), s_bullet),
-                Paragraph(esc(a.get("deadline", "-")), s_bullet),
-            ])
-        col_w = (page_w - 2 * margin)
-        act_table = Table(act_data, colWidths=[col_w * 0.55, col_w * 0.25, col_w * 0.20])
-        act_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), PURPLE_BG),
-            ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
-            ("INNERGRID", (0, 0), (-1, -1), 0.3, BORDER),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        story.append(act_table)
+            rows.append([Paragraph(esc(a.get("task", "")), s_bullet),
+                         Paragraph(esc(a.get("owner", "-")), s_bullet),
+                         Paragraph(esc(a.get("priority", "-")), s_bullet),
+                         Paragraph(esc(a.get("deadline", "-")), s_bullet)])
+        t = Table(rows, colWidths=[col_w*0.45, col_w*0.22, col_w*0.15, col_w*0.18])
+        t.setStyle(TABLE_STYLE)
+        story.append(t)
 
-    open_issues = notes.get("open_issues", [])
-    if open_issues:
-        story.append(Paragraph("Temes oberts", s_section))
-        for issue in open_issues:
-            story.append(Paragraph(f"• {esc(issue)}", s_bullet))
+    insights = notes.get("organizational_insights", [])
+    if insights:
+        story.append(Paragraph("Observacions organitzatives", s_section))
+        for i in insights:
+            txt = i.get("insight", "") if isinstance(i, dict) else str(i)
+            story.append(Paragraph(f"• {esc(txt)}", s_bullet))
 
     quotes = notes.get("quotes", [])
     if quotes:

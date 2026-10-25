@@ -847,35 +847,98 @@ function renderNotes(n) {
   }
 
   if (n.participants && n.participants.length) {
-    html += `<div class="notes-section"><h4>Participants</h4><p>${n.participants.map(esc).join(' · ')}</p></div>`;
+    html += `<div class="notes-section"><h4>Participants</h4><ul>`;
+    n.participants.forEach(p => {
+      if (typeof p === 'string') { html += `<li>${esc(p)}</li>`; }
+      else { html += `<li><strong>${esc(p.name)}</strong>${p.role ? ' — ' + esc(p.role) : ''}${p.context ? '. ' + esc(p.context) : ''}</li>`; }
+    });
+    html += `</ul></div>`;
   }
 
-  if (n.key_points && n.key_points.length) {
-    html += `<div class="notes-section"><h4>Punts clau</h4><ul>`;
-    n.key_points.forEach(kp => {
-      html += `<li><strong>${esc(kp.topic)}</strong>: ${esc(kp.details)}</li>`;
+  if (n.topics && n.topics.length) {
+    html += `<div class="notes-section"><h4>Temes tractats</h4>`;
+    n.topics.forEach(t => {
+      html += `<div style="margin-bottom:12px"><strong>${esc(t.title)}</strong><p style="margin:4px 0">${esc(t.summary)}</p>`;
+      if (t.key_facts && t.key_facts.length) {
+        html += `<ul>`;
+        t.key_facts.forEach(f => { html += `<li>${esc(f)}</li>`; });
+        html += `</ul>`;
+      }
+      html += `</div>`;
+    });
+    html += `</div>`;
+  }
+
+  if (n.platforms_and_technologies && n.platforms_and_technologies.length) {
+    html += `<div class="notes-section"><h4>Plataformes i Tecnologies</h4>`;
+    html += `<table class="action-table"><tr><th>Plataforma</th><th>Context</th><th>Estat</th></tr>`;
+    n.platforms_and_technologies.forEach(p => {
+      html += `<tr><td><strong>${esc(p.name)}</strong></td><td>${esc(p.context)}</td><td>${esc(p.status || '')}</td></tr>`;
+    });
+    html += `</table></div>`;
+  }
+
+  if (n.providers_and_services && n.providers_and_services.length) {
+    html += `<div class="notes-section"><h4>Proveïdors i Serveis</h4>`;
+    html += `<table class="action-table"><tr><th>Proveïdor</th><th>Detalls</th><th>Valoració</th></tr>`;
+    n.providers_and_services.forEach(p => {
+      html += `<tr><td><strong>${esc(p.name)}</strong></td><td>${esc(p.details)}</td><td>${esc(p.sentiment || '')}</td></tr>`;
+    });
+    html += `</table></div>`;
+  }
+
+  if (n.locations_and_sites && n.locations_and_sites.length) {
+    html += `<div class="notes-section"><h4>Ubicacions i Sites</h4><ul>`;
+    n.locations_and_sites.forEach(l => {
+      html += `<li><strong>${esc(l.name)}</strong>: ${esc(l.context)}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
+  if (n.strategies_and_plans && n.strategies_and_plans.length) {
+    html += `<div class="notes-section"><h4>Estratègies i Plans</h4><ul>`;
+    n.strategies_and_plans.forEach(s => {
+      html += `<li><strong>${esc(s.strategy)}</strong>: ${esc(s.rationale)}${s.timeline ? ' — <em>' + esc(s.timeline) + '</em>' : ''}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
+  if (n.problems_and_challenges && n.problems_and_challenges.length) {
+    html += `<div class="notes-section"><h4>Problemes i Reptes</h4><ul>`;
+    n.problems_and_challenges.forEach(p => {
+      html += `<li><strong>${esc(p.problem)}</strong> — Impacte: ${esc(p.impact)}${p.proposed_solution ? '. Solució: ' + esc(p.proposed_solution) : ''}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
+  if (n.numbers_and_data && n.numbers_and_data.length) {
+    html += `<div class="notes-section"><h4>Dades i Xifres</h4><ul>`;
+    n.numbers_and_data.forEach(d => {
+      html += `<li><strong>${esc(d.metric)}</strong>: ${esc(d.context)}</li>`;
     });
     html += `</ul></div>`;
   }
 
   if (n.decisions && n.decisions.length) {
-    html += `<div class="notes-section"><h4>Decisions preses</h4><ul>`;
+    html += `<div class="notes-section"><h4>Decisions</h4><ul>`;
     n.decisions.forEach(d => { html += `<li>${esc(d)}</li>`; });
     html += `</ul></div>`;
   }
 
   if (n.action_items && n.action_items.length) {
     html += `<div class="notes-section"><h4>Accions pendents</h4>`;
-    html += `<table class="action-table"><tr><th>Tasca</th><th>Responsable</th><th>Termini</th></tr>`;
+    html += `<table class="action-table"><tr><th>Tasca</th><th>Responsable</th><th>Prioritat</th><th>Termini</th></tr>`;
     n.action_items.forEach(a => {
-      html += `<tr><td>${esc(a.task)}</td><td>${esc(a.owner || '-')}</td><td>${esc(a.deadline || '-')}</td></tr>`;
+      html += `<tr><td>${esc(a.task)}</td><td>${esc(a.owner || '-')}</td><td>${esc(a.priority || '-')}</td><td>${esc(a.deadline || '-')}</td></tr>`;
     });
     html += `</table></div>`;
   }
 
-  if (n.open_issues && n.open_issues.length) {
-    html += `<div class="notes-section"><h4>Temes oberts</h4><ul>`;
-    n.open_issues.forEach(i => { html += `<li>${esc(i)}</li>`; });
+  if (n.organizational_insights && n.organizational_insights.length) {
+    html += `<div class="notes-section"><h4>Observacions organitzatives</h4><ul>`;
+    n.organizational_insights.forEach(i => {
+      html += `<li>${esc(typeof i === 'string' ? i : i.insight)}</li>`;
+    });
     html += `</ul></div>`;
   }
 
