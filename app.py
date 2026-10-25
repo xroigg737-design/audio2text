@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.9"
+APP_VERSION = "2.0"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -81,6 +81,8 @@ jobs: dict[str, dict] = {}
 
 def _load_previous_jobs():
     """Load completed jobs from disk so history survives restarts."""
+    from datetime import datetime
+
     for job_dir in OUTPUT_DIR.iterdir():
         if not job_dir.is_dir():
             continue
@@ -98,6 +100,17 @@ def _load_previous_jobs():
                        and f.stem != "preprocessed"]
         filename = audio_files[0].name if audio_files else "audio"
 
+        mtime = txt_file.stat().st_mtime
+        date_str = datetime.fromtimestamp(mtime).strftime("%d/%m/%Y %H:%M")
+
+        meta_file = job_dir / "meta.json"
+        meta = {}
+        if meta_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
         notes = None
         notes_file = job_dir / "notes.json"
         if notes_file.exists():
@@ -111,17 +124,18 @@ def _load_previous_jobs():
         jobs[job_id] = {
             "status": "done",
             "filename": filename,
-            "model": "?",
-            "language": "?",
+            "model": meta.get("model", ""),
+            "language": meta.get("language", ""),
+            "date": date_str,
             "queue": queue.Queue(),
             "result": {
                 "text": text,
                 "srt": srt,
-                "language": "?",
-                "duration": "?",
+                "language": meta.get("detected_language", ""),
+                "duration": meta.get("duration", ""),
                 "chars": len(text),
                 "segments": len(srt_blocks),
-                "backend": "?",
+                "backend": meta.get("backend", ""),
             },
         }
         if notes:
@@ -399,10 +413,26 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
 
         elapsed = time.time() - t0
 
+        from datetime import datetime
+
         job_dir = Path(audio_path).parent
         (job_dir / "transcript.txt").write_text(full_text, encoding="utf-8")
         (job_dir / "transcript.srt").write_text(srt_content, encoding="utf-8")
 
+        meta = {
+            "model": model_name,
+            "language": language,
+            "detected_language": detected_lang,
+            "duration": _format_duration(elapsed),
+            "backend": backend,
+            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        }
+        (job_dir / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        date_str = meta["date"]
+        jobs[job_id]["date"] = date_str
         jobs[job_id]["status"] = "done"
         jobs[job_id]["result"] = {
             "text": full_text,
@@ -971,6 +1001,7 @@ def history():
                 "chars": job["result"].get("chars", 0),
                 "duration": job["result"].get("duration", ""),
                 "backend": job["result"].get("backend", ""),
+                "date": job.get("date", ""),
             })
     return jsonify(items)
 

@@ -786,12 +786,18 @@ async function loadHistory() {
     const list = $('historyList');
     if (items.length === 0) { area.style.display = 'none'; return; }
     area.style.display = 'block';
-    list.innerHTML = items.map(it => `
+    list.innerHTML = items.map(it => {
+      const parts = [];
+      if (it.date) parts.push(it.date);
+      if (it.model) parts.push(it.model);
+      parts.push(it.chars.toLocaleString() + ' chars');
+      if (it.duration) parts.push(it.duration);
+      return `
       <div class="history-item" onclick="loadJob('${it.id}')">
         <span class="name">${it.filename}</span>
-        <span class="info">${it.model} · ${it.language} · ${it.chars.toLocaleString()} chars · ${it.duration}</span>
-      </div>
-    `).join('');
+        <span class="info">${parts.join(' · ')}</span>
+      </div>`;
+    }).join('');
   } catch(e) {}
 }
 
