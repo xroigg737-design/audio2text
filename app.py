@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Audio2Text - Transcribe audio files to text.
 
-Uses local Whisper when available, falls back to OpenAI Whisper API.
+Uses faster-whisper with GPU when available, falls back to OpenAI Whisper API.
 """
 
 import json
@@ -13,11 +13,9 @@ import time
 import uuid
 from pathlib import Path
 
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
 from dotenv import load_dotenv
 from flask import (Flask, Response, jsonify, render_template, request,
-                   send_from_directory)
+                   send_file, send_from_directory)
 
 load_dotenv()
 
@@ -31,28 +29,52 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.6"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
-# Approximate processing speed factors (audio_duration / processing_time)
-# Higher = faster. These are rough CPU estimates.
-MODEL_SPEED = {
-    "tiny": 12.0,
-    "base": 6.0,
-    "small": 2.5,
-    "medium": 1.2,
-    "large": 0.5,
-}
-API_SPEED = 3.0  # OpenAI API is quite fast
-
-# Detect if local Whisper is available
+# Detect GPU and faster-whisper
+DEVICE = "cpu"
+COMPUTE_TYPE = "int8"
 HAS_LOCAL_WHISPER = False
+
 try:
-    import whisper
+    from faster_whisper import WhisperModel
+    import ctranslate2
     HAS_LOCAL_WHISPER = True
+    if ctranslate2.get_cuda_device_count() > 0:
+        DEVICE = "cuda"
+        COMPUTE_TYPE = "float16"
 except ImportError:
     pass
+
+# Speed factors with faster-whisper + GPU (much faster than original whisper on CPU)
+MODEL_SPEED_GPU = {
+    "tiny": 120.0,
+    "base": 80.0,
+    "small": 40.0,
+    "medium": 20.0,
+    "large": 10.0,
+}
+MODEL_SPEED_CPU = {
+    "tiny": 25.0,
+    "base": 12.0,
+    "small": 5.0,
+    "medium": 2.5,
+    "large": 1.0,
+}
+API_SPEED = 3.0
+
+# faster-whisper model name mapping
+FASTER_WHISPER_NAMES = {
+    "tiny": "tiny",
+    "base": "base",
+    "small": "small",
+    "medium": "medium",
+    "large": "large-v3",
+}
+
+_loaded_models: dict[str, "WhisperModel"] = {}
 
 jobs: dict[str, dict] = {}
 
@@ -140,31 +162,79 @@ def _start_progress(job_id: str, audio_duration: float, speed_factor: float, pha
     return t
 
 
-def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: str,
-                       audio_duration: float):
-    """Transcribe using local Whisper model."""
-    _emit(job_id, "status", {"msg": f"Carregant model Whisper local '{model_name}'..."})
-    model = whisper.load_model(model_name, device="cpu")
+def _preprocess_audio(job_id: str, audio_path: str) -> str:
+    """Preprocess audio: normalize volume, reduce noise, convert to 16kHz mono WAV."""
+    preprocessed = str(Path(audio_path).parent / "preprocessed.wav")
+    _emit(job_id, "status", {"msg": "Preprocessant àudio (normalitzant volum, reduint soroll)..."})
+    cmd = [
+        "ffmpeg", "-y", "-i", audio_path,
+        "-af", "highpass=f=80,lowpass=f=8000,afftdn=nf=-20,loudnorm=I=-16:TP=-1.5:LRA=11",
+        "-ar", "16000", "-ac", "1",
+        preprocessed,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        return audio_path
+    return preprocessed
 
-    speed = MODEL_SPEED.get(model_name, 5.0)
+
+def _get_model(model_name: str) -> "WhisperModel":
+    """Load or return cached faster-whisper model."""
+    if model_name not in _loaded_models:
+        fw_name = FASTER_WHISPER_NAMES.get(model_name, model_name)
+        _loaded_models[model_name] = WhisperModel(
+            fw_name, device=DEVICE, compute_type=COMPUTE_TYPE,
+        )
+    return _loaded_models[model_name]
+
+
+def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: str,
+                       audio_duration: float, initial_prompt: str = ""):
+    """Transcribe using faster-whisper with GPU if available."""
+    device_label = "GPU" if DEVICE == "cuda" else "CPU"
+    _emit(job_id, "status", {"msg": f"Carregant model '{model_name}' ({device_label})..."})
+    model = _get_model(model_name)
+
+    processed_path = _preprocess_audio(job_id, audio_path)
+
+    speed_table = MODEL_SPEED_GPU if DEVICE == "cuda" else MODEL_SPEED_CPU
+    speed = speed_table.get(model_name, 5.0)
     _emit(job_id, "progress", {
         "pct": 0,
-        "msg": f"Transcrivint amb Whisper local ({_format_duration(audio_duration)} d'àudio)...",
+        "msg": f"Transcrivint amb faster-whisper {device_label} ({_format_duration(audio_duration)} d'àudio)...",
     })
     _start_progress(job_id, audio_duration, speed, "Transcrivint")
 
-    transcribe_opts = {"verbose": False, "fp16": False}
+    transcribe_opts: dict = {
+        "beam_size": 5,
+        "vad_filter": True,
+        "vad_parameters": {"min_silence_duration_ms": 300},
+        "word_timestamps": True,
+        "condition_on_previous_text": True,
+        "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        "compression_ratio_threshold": 2.4,
+        "log_prob_threshold": -1.0,
+        "no_speech_threshold": 0.6,
+        "repetition_penalty": 1.1,
+    }
     if language != "auto":
         transcribe_opts["language"] = language
+    if initial_prompt:
+        transcribe_opts["initial_prompt"] = initial_prompt
 
-    result = model.transcribe(audio_path, **transcribe_opts)
+    segments_iter, info = model.transcribe(processed_path, **transcribe_opts)
 
-    detected_lang = result.get("language", "unknown")
-    full_text = result["text"].strip()
-    segments = result.get("segments", [])
+    detected_lang = info.language or "unknown"
+    segments = []
+    text_parts = []
+    for seg in segments_iter:
+        segments.append({"start": seg.start, "end": seg.end, "text": seg.text})
+        text_parts.append(seg.text.strip())
+
+    full_text = " ".join(text_parts)
     srt_content = _generate_srt(segments)
 
-    return full_text, srt_content, detected_lang, len(segments), "local"
+    return full_text, srt_content, detected_lang, len(segments), f"local-{device_label}"
 
 
 def _compress_for_api(job_id: str, audio_path: str) -> str:
@@ -249,9 +319,9 @@ def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration:
     return full_text, srt_content, detected_lang, len(segments), "api"
 
 
-def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: str):
+def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: str,
+                       initial_prompt: str = ""):
     try:
-        # Get audio duration for progress estimation
         audio_duration = _get_audio_duration(audio_path)
         if audio_duration > 0:
             _emit(job_id, "info", {
@@ -263,7 +333,8 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
 
         if HAS_LOCAL_WHISPER:
             full_text, srt_content, detected_lang, num_segments, backend = \
-                _transcribe_local(job_id, audio_path, model_name, language, audio_duration)
+                _transcribe_local(job_id, audio_path, model_name, language, audio_duration,
+                                  initial_prompt)
         elif OPENAI_API_KEY:
             full_text, srt_content, detected_lang, num_segments, backend = \
                 _transcribe_api(job_id, audio_path, language, audio_duration)
@@ -307,6 +378,7 @@ def index():
         models=WHISPER_MODELS,
         backend=backend,
         has_local=HAS_LOCAL_WHISPER,
+        device=DEVICE.upper(),
     )
 
 
@@ -325,6 +397,7 @@ def transcribe():
 
     model_name = request.form.get("model", "base")
     language = request.form.get("language", "auto")
+    initial_prompt = request.form.get("prompt", "").strip()
 
     if model_name not in WHISPER_MODELS:
         model_name = "base"
@@ -347,7 +420,7 @@ def transcribe():
 
     thread = threading.Thread(
         target=_transcribe_worker,
-        args=(job_id, str(audio_path), model_name, language),
+        args=(job_id, str(audio_path), model_name, language, initial_prompt),
         daemon=True,
     )
     thread.start()
@@ -396,7 +469,203 @@ def download(job_id, fmt):
         return send_from_directory(str(job_dir), "transcript.txt", as_attachment=True)
     elif fmt == "srt":
         return send_from_directory(str(job_dir), "transcript.srt", as_attachment=True)
+    elif fmt == "pdf":
+        return _generate_pdf(job_id)
     return "Format no vàlid", 400
+
+
+def _generate_pdf(job_id: str):
+    from datetime import datetime
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (HRFlowable, Paragraph, SimpleDocTemplate,
+                                    Spacer, Table, TableStyle)
+
+    job = jobs[job_id]
+    result = job["result"]
+    filename = job.get("filename", "audio")
+
+    pdf_path = OUTPUT_DIR / job_id / "transcript.pdf"
+
+    BRAND_BLUE = colors.HexColor("#2563eb")
+    BRAND_DARK = colors.HexColor("#1e293b")
+    BRAND_GRAY = colors.HexColor("#64748b")
+    BRAND_LIGHT_BG = colors.HexColor("#f8fafc")
+    BRAND_BORDER = colors.HexColor("#e2e8f0")
+    BRAND_ACCENT = colors.HexColor("#0ea5e9")
+
+    page_w, page_h = A4
+    margin = 25 * mm
+
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(BRAND_BLUE)
+        canvas.rect(0, page_h - 8 * mm, page_w, 8 * mm, fill=True, stroke=False)
+        canvas.setFillColor(BRAND_ACCENT)
+        canvas.rect(0, page_h - 9 * mm, page_w, 1 * mm, fill=True, stroke=False)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(BRAND_GRAY)
+        canvas.drawString(margin, 12 * mm, f"Audio2Text v{APP_VERSION}")
+        canvas.drawRightString(page_w - margin, 12 * mm, f"Pàgina {doc.page}")
+        canvas.setStrokeColor(BRAND_BORDER)
+        canvas.line(margin, 16 * mm, page_w - margin, 16 * mm)
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        str(pdf_path), pagesize=A4,
+        leftMargin=margin, rightMargin=margin,
+        topMargin=margin + 10 * mm, bottomMargin=margin,
+    )
+
+    styles = getSampleStyleSheet()
+
+    s_title = ParagraphStyle(
+        "PDFTitle", parent=styles["Title"],
+        fontSize=22, leading=28, textColor=BRAND_DARK,
+        spaceAfter=4 * mm, alignment=TA_LEFT,
+        fontName="Helvetica-Bold",
+    )
+    s_subtitle = ParagraphStyle(
+        "PDFSubtitle", parent=styles["Normal"],
+        fontSize=10, leading=14, textColor=BRAND_GRAY,
+        spaceAfter=6 * mm, fontName="Helvetica",
+    )
+    s_section = ParagraphStyle(
+        "PDFSection", parent=styles["Heading2"],
+        fontSize=13, leading=18, textColor=BRAND_BLUE,
+        spaceBefore=6 * mm, spaceAfter=3 * mm,
+        fontName="Helvetica-Bold",
+        borderWidth=0, borderPadding=0,
+    )
+    s_body = ParagraphStyle(
+        "PDFBody", parent=styles["Normal"],
+        fontSize=10, leading=16, textColor=BRAND_DARK,
+        alignment=TA_JUSTIFY, fontName="Helvetica",
+        spaceAfter=2 * mm,
+    )
+    s_srt_time = ParagraphStyle(
+        "SRTTime", parent=styles["Normal"],
+        fontSize=8, leading=11, textColor=BRAND_ACCENT,
+        fontName="Helvetica-Bold",
+    )
+    s_srt_text = ParagraphStyle(
+        "SRTText", parent=styles["Normal"],
+        fontSize=9, leading=13, textColor=BRAND_DARK,
+        fontName="Helvetica",
+    )
+    s_meta_label = ParagraphStyle(
+        "MetaLabel", parent=styles["Normal"],
+        fontSize=8.5, leading=12, textColor=BRAND_GRAY,
+        fontName="Helvetica-Bold",
+    )
+    s_meta_val = ParagraphStyle(
+        "MetaVal", parent=styles["Normal"],
+        fontSize=9, leading=13, textColor=BRAND_DARK,
+        fontName="Helvetica",
+    )
+
+    story = []
+
+    base_name = Path(filename).stem
+    story.append(Paragraph("Transcripció", s_title))
+    story.append(Paragraph(
+        f"{base_name} &middot; {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        s_subtitle,
+    ))
+
+    story.append(HRFlowable(
+        width="100%", thickness=0.5, color=BRAND_BORDER,
+        spaceAfter=4 * mm, spaceBefore=0,
+    ))
+
+    lang_map = {
+        "ca": "Català", "es": "Castellà", "en": "Anglès",
+        "fr": "Francès", "de": "Alemany", "it": "Italià",
+        "pt": "Portuguès", "ja": "Japonès", "zh": "Xinès",
+    }
+    detected = result.get("language", "?")
+    lang_display = lang_map.get(detected, detected)
+
+    backend_label = result.get("backend", "")
+    if "GPU" in backend_label:
+        backend_label = "Whisper local (GPU)"
+    elif "CPU" in backend_label:
+        backend_label = "Whisper local (CPU)"
+    elif backend_label == "api":
+        backend_label = "OpenAI API"
+
+    meta_data = [
+        [Paragraph("FITXER", s_meta_label), Paragraph(filename, s_meta_val),
+         Paragraph("IDIOMA", s_meta_label), Paragraph(lang_display, s_meta_val)],
+        [Paragraph("TEMPS", s_meta_label), Paragraph(result.get("duration", "-"), s_meta_val),
+         Paragraph("BACKEND", s_meta_label), Paragraph(backend_label, s_meta_val)],
+        [Paragraph("CARÀCTERS", s_meta_label), Paragraph(f"{result.get('chars', 0):,}", s_meta_val),
+         Paragraph("SEGMENTS", s_meta_label), Paragraph(str(result.get("segments", 0)), s_meta_val)],
+    ]
+
+    col_w = (page_w - 2 * margin) / 4
+    meta_table = Table(meta_data, colWidths=[col_w * 0.8, col_w * 1.2, col_w * 0.8, col_w * 1.2])
+    meta_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), BRAND_LIGHT_BG),
+        ("BOX", (0, 0), (-1, -1), 0.5, BRAND_BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, BRAND_BORDER),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROUNDEDCORNERS", [3, 3, 3, 3]),
+    ]))
+    story.append(meta_table)
+
+    story.append(Paragraph("Transcripció completa", s_section))
+
+    text = result.get("text", "")
+    paragraphs = text.split("\n")
+    for p in paragraphs:
+        p = p.strip()
+        if p:
+            p_escaped = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            story.append(Paragraph(p_escaped, s_body))
+
+    srt = result.get("srt", "")
+    if srt.strip():
+        story.append(Paragraph("Subtítols (SRT)", s_section))
+
+        srt_rows = []
+        blocks = srt.strip().split("\n\n")
+        for block in blocks:
+            lines = block.strip().split("\n")
+            if len(lines) >= 3:
+                timecode = lines[1]
+                seg_text = " ".join(lines[2:])
+                seg_text_escaped = seg_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                srt_rows.append([
+                    Paragraph(timecode, s_srt_time),
+                    Paragraph(seg_text_escaped, s_srt_text),
+                ])
+
+        if srt_rows:
+            srt_table = Table(srt_rows, colWidths=[55 * mm, page_w - 2 * margin - 55 * mm])
+            srt_table.setStyle(TableStyle([
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LINEBELOW", (0, 0), (-1, -2), 0.3, BRAND_BORDER),
+                ("BACKGROUND", (0, 0), (0, -1), BRAND_LIGHT_BG),
+            ]))
+            story.append(srt_table)
+
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+
+    download_name = f"{base_name}_transcripcio.pdf"
+    return send_file(str(pdf_path), as_attachment=True, download_name=download_name)
 
 
 @app.route("/history")

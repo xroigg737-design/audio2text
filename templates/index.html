@@ -123,6 +123,39 @@
   }
   .options select:focus { border-color: var(--accent); }
 
+  .prompt-area {
+    margin-bottom: 20px;
+  }
+  .prompt-area label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 6px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .prompt-area textarea {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-family: inherit;
+    outline: none;
+    resize: vertical;
+    min-height: 60px;
+    transition: border-color 0.2s;
+  }
+  .prompt-area textarea:focus { border-color: var(--accent); }
+  .prompt-area .hint {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
   .btn {
     display: inline-flex;
     align-items: center;
@@ -296,6 +329,15 @@
     background: rgba(122,175,255,0.2);
     border-color: var(--accent);
   }
+  .btn-pdf {
+    background: rgba(233,69,96,0.12);
+    color: #e94560;
+    border-color: rgba(233,69,96,0.25);
+  }
+  .btn-pdf:hover {
+    background: rgba(233,69,96,0.22);
+    border-color: #e94560;
+  }
 
   /* History */
   .history {
@@ -355,8 +397,9 @@
 <nav>
   <span class="brand">Audio2Text</span>
   <span class="version">v{{ version }}</span>
+
   <span class="version" style="margin-left:8px;padding:3px 8px;border-radius:4px;background:{% if backend == 'local' %}rgba(45,212,191,0.15);color:#2dd4bf{% elif backend == 'api' %}rgba(122,175,255,0.15);color:#7aafff{% else %}rgba(233,69,96,0.15);color:#e94560{% endif %}">
-    {% if backend == 'local' %}Whisper local{% elif backend == 'api' %}OpenAI API{% else %}Sense backend{% endif %}
+    {% if backend == 'local' %}Whisper local ({{ device }}){% elif backend == 'api' %}OpenAI API{% else %}Sense backend{% endif %}
   </span>
   <a class="back" href="/">&#8592; Landing</a>
 </nav>
@@ -378,7 +421,7 @@
       <select id="modelSelect">
         {% for m in models %}
         <option value="{{ m }}" {% if m == 'base' %}selected{% endif %}>
-          {{ m }}{% if m == 'tiny' %} (ràpid){% elif m == 'base' %} (recomanat){% elif m == 'large' %} (lent, millor qualitat){% endif %}
+          {{ m }}{% if m == 'tiny' %} (ràpid){% elif m == 'base' %} (recomanat){% elif m == 'large' %} (millor qualitat){% endif %}
         </option>
         {% endfor %}
       </select>
@@ -398,6 +441,12 @@
         <option value="zh">Xinès</option>
       </select>
     </div>
+  </div>
+
+  <div class="prompt-area">
+    <label>Context (opcional, millora la precisió)</label>
+    <textarea id="promptInput" placeholder="Escriu noms de persones, empreses, termes tècnics o context de la conversa. Ex: Reunió entre en Lluís i en Pere sobre pressupostos de TI a l'empresa Gallina Blanca."></textarea>
+    <div class="hint">Ajuda Whisper a reconèixer millor noms propis, sigles i vocabulari específic</div>
   </div>
 
   <button class="btn" id="btnTranscribe" disabled>
@@ -442,8 +491,9 @@
 
     <div class="actions">
       <button class="btn-sm" id="btnCopy">&#128203; Copiar text</button>
-      <a class="btn-sm" id="btnDownloadTxt" download>&#8615; Descarregar .txt</a>
-      <a class="btn-sm" id="btnDownloadSrt" download>&#8615; Descarregar .srt</a>
+      <a class="btn-sm" id="btnDownloadTxt" download>&#8615; .txt</a>
+      <a class="btn-sm" id="btnDownloadSrt" download>&#8615; .srt</a>
+      <a class="btn-sm btn-pdf" id="btnDownloadPdf" download>&#8615; PDF</a>
     </div>
   </div>
 
@@ -513,6 +563,7 @@ btn.addEventListener('click', async () => {
   form.append('audio', selectedFile);
   form.append('model', $('modelSelect').value);
   form.append('language', $('langSelect').value);
+  form.append('prompt', $('promptInput').value);
 
   try {
     const res = await fetch(`${BASE}/transcribe`, { method: 'POST', body: form });
@@ -602,6 +653,7 @@ function showResults(d, jobId) {
   $('tabSrt').textContent = d.srt;
   $('btnDownloadTxt').href = `${BASE}/download/${jobId}/txt`;
   $('btnDownloadSrt').href = `${BASE}/download/${jobId}/srt`;
+  $('btnDownloadPdf').href = `${BASE}/download/${jobId}/pdf`;
 
   // Reset to text tab
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));

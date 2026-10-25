@@ -2,3 +2,4 @@ flask>=3.0
 python-dotenv>=1.0
 httpx>=0.27
 openai-whisper>=20231117; sys_platform != "linux" or platform_machine != "aarch64"
+reportlab>=4.0
