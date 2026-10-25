@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -77,6 +77,58 @@ FASTER_WHISPER_NAMES = {
 _loaded_models: dict[str, "WhisperModel"] = {}
 
 jobs: dict[str, dict] = {}
+
+
+def _load_previous_jobs():
+    """Load completed jobs from disk so history survives restarts."""
+    for job_dir in OUTPUT_DIR.iterdir():
+        if not job_dir.is_dir():
+            continue
+        txt_file = job_dir / "transcript.txt"
+        srt_file = job_dir / "transcript.srt"
+        if not txt_file.exists() or not srt_file.exists():
+            continue
+
+        job_id = job_dir.name
+        text = txt_file.read_text(encoding="utf-8")
+        srt = srt_file.read_text(encoding="utf-8")
+
+        audio_files = [f for f in job_dir.iterdir()
+                       if f.suffix.lower() in ALLOWED_EXTENSIONS
+                       and f.stem != "preprocessed"]
+        filename = audio_files[0].name if audio_files else "audio"
+
+        notes = None
+        notes_file = job_dir / "notes.json"
+        if notes_file.exists():
+            try:
+                notes = json.loads(notes_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        srt_blocks = [b for b in srt.strip().split("\n\n") if b.strip()]
+
+        jobs[job_id] = {
+            "status": "done",
+            "filename": filename,
+            "model": "?",
+            "language": "?",
+            "queue": queue.Queue(),
+            "result": {
+                "text": text,
+                "srt": srt,
+                "language": "?",
+                "duration": "?",
+                "chars": len(text),
+                "segments": len(srt_blocks),
+                "backend": "?",
+            },
+        }
+        if notes:
+            jobs[job_id]["notes"] = notes
+
+
+_load_previous_jobs()
 
 
 def _format_srt_time(seconds: float) -> str:
