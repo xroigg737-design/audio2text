@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -851,16 +851,17 @@ def generate_notes(job_id):
 
     context = request.json.get("context", "") if request.is_json else ""
 
-    user_msg = f"Transcripció:\n\n{text}"
+    user_msg = ""
     if context:
-        user_msg = f"Context addicional: {context}\n\n{user_msg}"
+        user_msg = f"CONTEXT IMPORTANT (proporcionat per l'usuari, és informació fiable):\n{context}\n\nUtilitza aquest context per identificar correctament els participants, els seus càrrecs i el motiu de la conversa.\n\n"
+    user_msg += f"TRANSCRIPCIÓ (pot contenir errors de reconeixement de veu):\n\n{text}"
 
     try:
         resp = httpx.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
             json={
-                "model": "gpt-4o",
+                "model": "gpt-4.1",
                 "messages": [
                     {"role": "system", "content": NOTES_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
