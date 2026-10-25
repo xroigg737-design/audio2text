@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -666,6 +666,243 @@ def _generate_pdf(job_id: str):
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
 
     download_name = f"{base_name}_transcripcio.pdf"
+    return send_file(str(pdf_path), as_attachment=True, download_name=download_name)
+
+
+NOTES_SYSTEM_PROMPT = """Ets un assistent expert en generar apunts professionals i ben estructurats a partir de transcripcions d'àudio.
+Genera els apunts en el MATEIX IDIOMA que la transcripció.
+Retorna NOMÉS un JSON vàlid amb aquesta estructura exacta (sense markdown, sense ```json):
+{
+  "title": "Títol descriptiu de la reunió/conversa",
+  "summary": "Resum executiu de 2-3 frases",
+  "participants": ["Nom1", "Nom2"],
+  "key_points": [
+    {"topic": "Tema", "details": "Detalls del punt"}
+  ],
+  "decisions": ["Decisió 1", "Decisió 2"],
+  "action_items": [
+    {"task": "Tasca", "owner": "Responsable (si es menciona)", "deadline": "Termini (si es menciona)"}
+  ],
+  "open_issues": ["Tema pendent 1"],
+  "quotes": ["Frase rellevant textual entre cometes"]
+}
+Si algun camp no aplica, retorna una llista buida []."""
+
+
+@app.route("/generate-notes/<job_id>", methods=["POST"])
+def generate_notes(job_id):
+    if job_id not in jobs or jobs[job_id]["status"] != "done":
+        return jsonify({"error": "Job no trobat o no completat"}), 404
+
+    if not OPENAI_API_KEY:
+        return jsonify({"error": "OPENAI_API_KEY no configurada"}), 500
+
+    import httpx
+
+    text = jobs[job_id]["result"].get("text", "")
+    if not text.strip():
+        return jsonify({"error": "Transcripció buida"}), 400
+
+    context = request.json.get("context", "") if request.is_json else ""
+
+    user_msg = f"Transcripció:\n\n{text}"
+    if context:
+        user_msg = f"Context addicional: {context}\n\n{user_msg}"
+
+    try:
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": NOTES_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 4000,
+            },
+            timeout=120,
+        )
+
+        if resp.status_code != 200:
+            return jsonify({"error": f"API error: {resp.text[:300]}"}), 500
+
+        content = resp.json()["choices"][0]["message"]["content"].strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        notes = json.loads(content)
+        jobs[job_id]["notes"] = notes
+
+        job_dir = OUTPUT_DIR / job_id
+        (job_dir / "notes.json").write_text(
+            json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        return jsonify(notes)
+
+    except json.JSONDecodeError:
+        return jsonify({"error": "L'IA no ha retornat un format vàlid. Torna a intentar-ho."}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/download/<job_id>/notes-pdf")
+def download_notes_pdf(job_id):
+    if job_id not in jobs or "notes" not in jobs.get(job_id, {}):
+        return "No disponible", 404
+    return _generate_notes_pdf(job_id)
+
+
+def _generate_notes_pdf(job_id: str):
+    from datetime import datetime
+
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (HRFlowable, ListFlowable, ListItem,
+                                    Paragraph, SimpleDocTemplate, Spacer,
+                                    Table, TableStyle)
+
+    job = jobs[job_id]
+    notes = job["notes"]
+    filename = job.get("filename", "audio")
+    base_name = Path(filename).stem
+
+    pdf_path = OUTPUT_DIR / job_id / "notes.pdf"
+
+    BRAND = colors.HexColor("#7c3aed")
+    BRAND_LIGHT = colors.HexColor("#8b5cf6")
+    DARK = colors.HexColor("#1e293b")
+    GRAY = colors.HexColor("#64748b")
+    LIGHT_BG = colors.HexColor("#f8fafc")
+    PURPLE_BG = colors.HexColor("#faf5ff")
+    BORDER = colors.HexColor("#e2e8f0")
+    GREEN = colors.HexColor("#059669")
+    AMBER = colors.HexColor("#d97706")
+
+    page_w, page_h = A4
+    margin = 25 * mm
+
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(BRAND)
+        canvas.rect(0, page_h - 8 * mm, page_w, 8 * mm, fill=True, stroke=False)
+        canvas.setFillColor(BRAND_LIGHT)
+        canvas.rect(0, page_h - 9 * mm, page_w, 1 * mm, fill=True, stroke=False)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(GRAY)
+        canvas.drawString(margin, 12 * mm, f"Audio2Text v{APP_VERSION} — Apunts generats amb IA")
+        canvas.drawRightString(page_w - margin, 12 * mm, f"Pàgina {doc.page}")
+        canvas.setStrokeColor(BORDER)
+        canvas.line(margin, 16 * mm, page_w - margin, 16 * mm)
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
+        str(pdf_path), pagesize=A4,
+        leftMargin=margin, rightMargin=margin,
+        topMargin=margin + 10 * mm, bottomMargin=margin,
+    )
+
+    styles = getSampleStyleSheet()
+    s_title = ParagraphStyle("NTitle", fontSize=20, leading=26, textColor=DARK,
+                             spaceAfter=3*mm, fontName="Helvetica-Bold", alignment=TA_LEFT)
+    s_subtitle = ParagraphStyle("NSub", fontSize=10, leading=14, textColor=GRAY,
+                                spaceAfter=5*mm, fontName="Helvetica")
+    s_section = ParagraphStyle("NSec", fontSize=12, leading=17, textColor=BRAND,
+                               spaceBefore=6*mm, spaceAfter=3*mm, fontName="Helvetica-Bold")
+    s_body = ParagraphStyle("NBody", fontSize=10, leading=15, textColor=DARK,
+                            alignment=TA_JUSTIFY, fontName="Helvetica", spaceAfter=2*mm)
+    s_bullet = ParagraphStyle("NBullet", fontSize=9.5, leading=14, textColor=DARK,
+                              fontName="Helvetica", leftIndent=6*mm, spaceAfter=1.5*mm)
+    s_quote = ParagraphStyle("NQuote", fontSize=9, leading=13, textColor=GRAY,
+                             fontName="Helvetica-Oblique", leftIndent=8*mm, rightIndent=8*mm,
+                             spaceAfter=2*mm, borderWidth=0.5, borderColor=BRAND_LIGHT,
+                             borderPadding=4, borderRadius=2)
+
+    def esc(t):
+        return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    story = []
+
+    title = notes.get("title", "Apunts de la reunió")
+    story.append(Paragraph(esc(title), s_title))
+    story.append(Paragraph(
+        f"{base_name} &middot; {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        s_subtitle,
+    ))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER,
+                             spaceAfter=4*mm, spaceBefore=0))
+
+    summary = notes.get("summary", "")
+    if summary:
+        story.append(Paragraph("Resum executiu", s_section))
+        story.append(Paragraph(esc(summary), s_body))
+
+    participants = notes.get("participants", [])
+    if participants:
+        story.append(Paragraph("Participants", s_section))
+        story.append(Paragraph(esc(" · ".join(participants)), s_body))
+
+    key_points = notes.get("key_points", [])
+    if key_points:
+        story.append(Paragraph("Punts clau", s_section))
+        for kp in key_points:
+            topic = esc(kp.get("topic", ""))
+            details = esc(kp.get("details", ""))
+            story.append(Paragraph(f"<b>{topic}</b>: {details}", s_bullet))
+
+    decisions = notes.get("decisions", [])
+    if decisions:
+        story.append(Paragraph("Decisions preses", s_section))
+        for d in decisions:
+            story.append(Paragraph(f"• {esc(d)}", s_bullet))
+
+    actions = notes.get("action_items", [])
+    if actions:
+        story.append(Paragraph("Accions pendents", s_section))
+        act_data = [
+            [Paragraph("<b>Tasca</b>", s_bullet),
+             Paragraph("<b>Responsable</b>", s_bullet),
+             Paragraph("<b>Termini</b>", s_bullet)],
+        ]
+        for a in actions:
+            act_data.append([
+                Paragraph(esc(a.get("task", "")), s_bullet),
+                Paragraph(esc(a.get("owner", "-")), s_bullet),
+                Paragraph(esc(a.get("deadline", "-")), s_bullet),
+            ])
+        col_w = (page_w - 2 * margin)
+        act_table = Table(act_data, colWidths=[col_w * 0.55, col_w * 0.25, col_w * 0.20])
+        act_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), PURPLE_BG),
+            ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+            ("INNERGRID", (0, 0), (-1, -1), 0.3, BORDER),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(act_table)
+
+    open_issues = notes.get("open_issues", [])
+    if open_issues:
+        story.append(Paragraph("Temes oberts", s_section))
+        for issue in open_issues:
+            story.append(Paragraph(f"• {esc(issue)}", s_bullet))
+
+    quotes = notes.get("quotes", [])
+    if quotes:
+        story.append(Paragraph("Cites rellevants", s_section))
+        for q in quotes:
+            story.append(Paragraph(f"«{esc(q)}»", s_quote))
+
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+
+    download_name = f"{base_name}_apunts.pdf"
     return send_file(str(pdf_path), as_attachment=True, download_name=download_name)
 
 

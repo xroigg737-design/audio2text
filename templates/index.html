@@ -338,6 +338,91 @@
     background: rgba(233,69,96,0.22);
     border-color: #e94560;
   }
+  .btn-notes {
+    background: linear-gradient(135deg, rgba(124,58,237,0.15), rgba(139,92,246,0.15));
+    color: #a78bfa;
+    border-color: rgba(124,58,237,0.3);
+    font-size: 0.9rem;
+    padding: 10px 20px;
+  }
+  .btn-notes:hover {
+    background: linear-gradient(135deg, rgba(124,58,237,0.25), rgba(139,92,246,0.25));
+    border-color: #a78bfa;
+  }
+  .btn-notes:disabled { opacity: 0.4; cursor: wait; }
+
+  /* Notes */
+  .notes-area {
+    display: none;
+    margin-top: 24px;
+    padding: 24px;
+    background: var(--surface);
+    border: 1px solid rgba(124,58,237,0.3);
+    border-radius: 12px;
+  }
+  .notes-area h3 {
+    color: #a78bfa;
+    font-size: 1.1rem;
+    margin-bottom: 16px;
+  }
+  .notes-section {
+    margin-bottom: 16px;
+  }
+  .notes-section h4 {
+    color: #a78bfa;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(124,58,237,0.2);
+  }
+  .notes-section p, .notes-section li {
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: #ddd;
+  }
+  .notes-section ul { list-style: none; padding-left: 0; }
+  .notes-section ul li::before {
+    content: "›";
+    color: #a78bfa;
+    font-weight: bold;
+    margin-right: 8px;
+  }
+  .notes-section .quote {
+    font-style: italic;
+    color: var(--muted);
+    border-left: 3px solid #a78bfa;
+    padding-left: 12px;
+    margin: 6px 0;
+  }
+  .action-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  .action-table th {
+    text-align: left;
+    color: #a78bfa;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(124,58,237,0.3);
+  }
+  .action-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(124,58,237,0.1);
+    color: #ddd;
+  }
+  .notes-loading {
+    text-align: center;
+    padding: 20px;
+    color: #a78bfa;
+  }
+  .notes-loading .spinner {
+    border-top-color: #a78bfa;
+    margin: 0 auto 10px;
+  }
 
   /* History */
   .history {
@@ -495,6 +580,19 @@
       <a class="btn-sm" id="btnDownloadSrt" download>&#8615; .srt</a>
       <a class="btn-sm btn-pdf" id="btnDownloadPdf" download>&#8615; PDF</a>
     </div>
+
+    <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border)">
+      <button class="btn-sm btn-notes" id="btnGenNotes">&#9998; Generar Apunts amb IA</button>
+    </div>
+  </div>
+
+  <div class="notes-area" id="notesArea">
+    <h3>&#128221; Apunts generats amb IA</h3>
+    <div id="notesContent"></div>
+    <div class="actions" style="margin-top:16px">
+      <a class="btn-sm btn-pdf" id="btnDownloadNotesPdf" download>&#8615; Apunts PDF</a>
+      <button class="btn-sm" id="btnCopyNotes">&#128203; Copiar apunts</button>
+    </div>
   </div>
 
   <div class="history" id="historyArea" style="display:none">
@@ -644,7 +742,11 @@ function listenSSE(jobId) {
 }
 
 function showResults(d, jobId) {
+  currentJobId = jobId;
   $('results').style.display = 'block';
+  $('notesArea').style.display = 'none';
+  $('btnGenNotes').disabled = false;
+  $('btnGenNotes').textContent = '✎ Generar Apunts amb IA';
   $('metaLang').textContent = 'Idioma: ' + d.language;
   $('metaDuration').textContent = 'Temps: ' + d.duration;
   $('metaChars').textContent = d.chars.toLocaleString() + ' caràcters';
@@ -700,6 +802,96 @@ async function loadJob(id) {
     if (data.status === 'done') showResults(data.result, id);
   } catch(e) {}
 }
+
+// Notes generation
+let currentJobId = null;
+
+$('btnGenNotes').addEventListener('click', async () => {
+  if (!currentJobId) return;
+  const btn = $('btnGenNotes');
+  btn.disabled = true;
+  btn.textContent = 'Generant apunts...';
+
+  $('notesArea').style.display = 'block';
+  $('notesContent').innerHTML = '<div class="notes-loading"><div class="spinner"></div>Analitzant transcripció amb IA...</div>';
+
+  try {
+    const res = await fetch(`${BASE}/generate-notes/${currentJobId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    renderNotes(data);
+    $('btnDownloadNotesPdf').href = `${BASE}/download/${currentJobId}/notes-pdf`;
+    btn.textContent = '✔ Apunts generats';
+  } catch (e) {
+    $('notesContent').innerHTML = `<p style="color:var(--error)">Error: ${e.message}</p>`;
+    btn.disabled = false;
+    btn.textContent = '✎ Generar Apunts amb IA';
+  }
+});
+
+function renderNotes(n) {
+  let html = '';
+
+  if (n.summary) {
+    html += `<div class="notes-section"><h4>Resum executiu</h4><p>${esc(n.summary)}</p></div>`;
+  }
+
+  if (n.participants && n.participants.length) {
+    html += `<div class="notes-section"><h4>Participants</h4><p>${n.participants.map(esc).join(' · ')}</p></div>`;
+  }
+
+  if (n.key_points && n.key_points.length) {
+    html += `<div class="notes-section"><h4>Punts clau</h4><ul>`;
+    n.key_points.forEach(kp => {
+      html += `<li><strong>${esc(kp.topic)}</strong>: ${esc(kp.details)}</li>`;
+    });
+    html += `</ul></div>`;
+  }
+
+  if (n.decisions && n.decisions.length) {
+    html += `<div class="notes-section"><h4>Decisions preses</h4><ul>`;
+    n.decisions.forEach(d => { html += `<li>${esc(d)}</li>`; });
+    html += `</ul></div>`;
+  }
+
+  if (n.action_items && n.action_items.length) {
+    html += `<div class="notes-section"><h4>Accions pendents</h4>`;
+    html += `<table class="action-table"><tr><th>Tasca</th><th>Responsable</th><th>Termini</th></tr>`;
+    n.action_items.forEach(a => {
+      html += `<tr><td>${esc(a.task)}</td><td>${esc(a.owner || '-')}</td><td>${esc(a.deadline || '-')}</td></tr>`;
+    });
+    html += `</table></div>`;
+  }
+
+  if (n.open_issues && n.open_issues.length) {
+    html += `<div class="notes-section"><h4>Temes oberts</h4><ul>`;
+    n.open_issues.forEach(i => { html += `<li>${esc(i)}</li>`; });
+    html += `</ul></div>`;
+  }
+
+  if (n.quotes && n.quotes.length) {
+    html += `<div class="notes-section"><h4>Cites rellevants</h4>`;
+    n.quotes.forEach(q => { html += `<div class="quote">«${esc(q)}»</div>`; });
+    html += `</div>`;
+  }
+
+  $('notesContent').innerHTML = html;
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+$('btnCopyNotes').addEventListener('click', () => {
+  const text = $('notesContent').innerText;
+  navigator.clipboard.writeText(text).then(() => toast('Apunts copiats!'));
+});
 
 loadHistory();
 </script>
