@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "2.9"
+APP_VERSION = "3.0"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -47,6 +47,84 @@ try:
         COMPUTE_TYPE = "float16"
 except ImportError:
     pass
+
+# Speaker diarization with pyannote-audio
+HAS_DIARIZATION = False
+_diarization_pipeline = None
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+
+try:
+    from pyannote.audio import Pipeline as PyannotePipeline
+    if HF_TOKEN:
+        HAS_DIARIZATION = True
+except ImportError:
+    pass
+
+
+def _get_diarization_pipeline():
+    global _diarization_pipeline
+    if _diarization_pipeline is None:
+        _diarization_pipeline = PyannotePipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=HF_TOKEN,
+        )
+        import torch
+        if torch.cuda.is_available():
+            _diarization_pipeline.to(torch.device("cuda"))
+    return _diarization_pipeline
+
+
+def _run_diarization(job_id: str, audio_path: str, audio_duration: float) -> list[dict]:
+    """Run speaker diarization and return list of {start, end, speaker}."""
+    _emit(job_id, "status", {"msg": "Identificant interlocutors (diarització)..."})
+    _start_progress(job_id, audio_duration, 8.0, "Diaritzant")
+
+    pipeline = _get_diarization_pipeline()
+    diarization = pipeline(audio_path)
+
+    speakers = []
+    for turn, _, speaker in diarization.itertracks(yield_label=True):
+        speakers.append({
+            "start": turn.start,
+            "end": turn.end,
+            "speaker": speaker,
+        })
+    return speakers
+
+
+def _assign_speakers(whisper_segments: list[dict], diarization: list[dict]) -> list[dict]:
+    """Assign a speaker label to each whisper segment based on overlap with diarization."""
+    speaker_map = {}
+    speaker_counter = 0
+
+    for seg in whisper_segments:
+        seg_start = seg["start"]
+        seg_end = seg["end"]
+        seg_mid = (seg_start + seg_end) / 2
+
+        best_speaker = None
+        best_overlap = 0
+
+        for d in diarization:
+            overlap_start = max(seg_start, d["start"])
+            overlap_end = min(seg_end, d["end"])
+            overlap = max(0, overlap_end - overlap_start)
+
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = d["speaker"]
+
+            if best_overlap == 0 and d["start"] <= seg_mid <= d["end"]:
+                best_speaker = d["speaker"]
+                best_overlap = 0.001
+
+        if best_speaker and best_speaker not in speaker_map:
+            speaker_counter += 1
+            speaker_map[best_speaker] = f"Speaker {speaker_counter}"
+
+        seg["speaker"] = speaker_map.get(best_speaker, "Speaker ?") if best_speaker else ""
+
+    return whisper_segments
 
 # Speed factors with faster-whisper + GPU (much faster than original whisper on CPU)
 MODEL_SPEED_GPU = {
@@ -136,6 +214,8 @@ def _load_previous_jobs():
                 "chars": len(text),
                 "segments": len(srt_blocks),
                 "backend": meta.get("backend", ""),
+                "diarization": meta.get("diarization", False),
+                "num_speakers": meta.get("num_speakers", 0),
             },
         }
         if notes:
@@ -159,8 +239,40 @@ def _generate_srt(segments: list[dict]) -> str:
         start = _format_srt_time(seg["start"])
         end = _format_srt_time(seg["end"])
         text = seg["text"].strip()
+        speaker = seg.get("speaker", "")
+        if speaker:
+            text = f"[{speaker}] {text}"
         lines.append(f"{i}\n{start} --> {end}\n{text}\n")
     return "\n".join(lines)
+
+
+def _generate_text_with_speakers(segments: list[dict]) -> str:
+    """Generate text with speaker labels, grouping consecutive segments by same speaker."""
+    if not segments or not segments[0].get("speaker"):
+        return " ".join(seg["text"].strip() for seg in segments)
+
+    parts = []
+    current_speaker = None
+    current_texts = []
+
+    for seg in segments:
+        speaker = seg.get("speaker", "")
+        text = seg["text"].strip()
+        if not text:
+            continue
+
+        if speaker != current_speaker:
+            if current_texts:
+                parts.append(f"[{current_speaker}]\n{' '.join(current_texts)}\n")
+            current_speaker = speaker
+            current_texts = [text]
+        else:
+            current_texts.append(text)
+
+    if current_texts:
+        parts.append(f"[{current_speaker}]\n{' '.join(current_texts)}\n")
+
+    return "\n".join(parts)
 
 
 def _format_duration(seconds: float) -> str:
@@ -293,15 +405,10 @@ def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: s
 
     detected_lang = info.language or "unknown"
     segments = []
-    text_parts = []
     for seg in segments_iter:
         segments.append({"start": seg.start, "end": seg.end, "text": seg.text})
-        text_parts.append(seg.text.strip())
 
-    full_text = " ".join(text_parts)
-    srt_content = _generate_srt(segments)
-
-    return full_text, srt_content, detected_lang, len(segments), f"local-{device_label}"
+    return segments, detected_lang, processed_path, f"local-{device_label}"
 
 
 def _compress_for_api(job_id: str, audio_path: str) -> str:
@@ -371,23 +478,17 @@ def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration:
         raise RuntimeError(f"API error ({resp.status_code}): {resp.text[:300]}")
 
     result = resp.json()
-    full_text = result.get("text", "").strip()
     detected_lang = result.get("language", "unknown")
-    segments = result.get("segments", [])
+    segments = [
+        {"start": seg.get("start", 0), "end": seg.get("end", 0), "text": seg.get("text", "")}
+        for seg in result.get("segments", [])
+    ]
 
-    srt_lines = []
-    for i, seg in enumerate(segments, 1):
-        start = _format_srt_time(seg.get("start", 0))
-        end = _format_srt_time(seg.get("end", 0))
-        text = seg.get("text", "").strip()
-        srt_lines.append(f"{i}\n{start} --> {end}\n{text}\n")
-    srt_content = "\n".join(srt_lines)
-
-    return full_text, srt_content, detected_lang, len(segments), "api"
+    return segments, detected_lang, audio_path, "api"
 
 
 def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: str,
-                       initial_prompt: str = ""):
+                       initial_prompt: str = "", diarize: bool = False):
     try:
         audio_duration = _get_audio_duration(audio_path)
         if audio_duration > 0:
@@ -399,17 +500,38 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
         t0 = time.time()
 
         if HAS_LOCAL_WHISPER:
-            full_text, srt_content, detected_lang, num_segments, backend = \
+            segments, detected_lang, processed_path, backend = \
                 _transcribe_local(job_id, audio_path, model_name, language, audio_duration,
                                   initial_prompt)
         elif OPENAI_API_KEY:
-            full_text, srt_content, detected_lang, num_segments, backend = \
+            segments, detected_lang, processed_path, backend = \
                 _transcribe_api(job_id, audio_path, language, audio_duration)
         else:
             raise RuntimeError(
                 "Ni Whisper local ni OPENAI_API_KEY disponibles. "
                 "Instal·la openai-whisper o configura OPENAI_API_KEY."
             )
+
+        num_speakers = 0
+        if diarize and HAS_DIARIZATION and segments:
+            try:
+                diar_audio = processed_path if os.path.exists(processed_path) else audio_path
+                diarization_result = _run_diarization(job_id, diar_audio, audio_duration)
+                if diarization_result:
+                    segments = _assign_speakers(segments, diarization_result)
+                    unique_speakers = set(s.get("speaker", "") for s in segments if s.get("speaker"))
+                    num_speakers = len(unique_speakers)
+                    _emit(job_id, "status", {"msg": f"Detectats {num_speakers} interlocutors"})
+            except Exception as e:
+                print(f"[DIARIZE] Error: {e}")
+                _emit(job_id, "status", {"msg": f"Diarització fallida: {e}. Continuant sense speakers..."})
+
+        has_speakers = any(seg.get("speaker") for seg in segments)
+        if has_speakers:
+            full_text = _generate_text_with_speakers(segments)
+        else:
+            full_text = " ".join(seg["text"].strip() for seg in segments)
+        srt_content = _generate_srt(segments)
 
         elapsed = time.time() - t0
 
@@ -425,6 +547,8 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
             "detected_language": detected_lang,
             "duration": _format_duration(elapsed),
             "backend": backend,
+            "diarization": diarize and has_speakers,
+            "num_speakers": num_speakers,
             "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
         }
         (job_dir / "meta.json").write_text(
@@ -440,8 +564,10 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
             "language": detected_lang,
             "duration": _format_duration(elapsed),
             "chars": len(full_text),
-            "segments": num_segments,
+            "segments": len(segments),
             "backend": backend,
+            "diarization": meta["diarization"],
+            "num_speakers": num_speakers,
         }
 
         _emit(job_id, "done", jobs[job_id]["result"])
@@ -462,6 +588,7 @@ def index():
         backend=backend,
         has_local=HAS_LOCAL_WHISPER,
         device=DEVICE.upper(),
+        has_diarization=HAS_DIARIZATION,
     )
 
 
@@ -481,6 +608,7 @@ def transcribe():
     model_name = request.form.get("model", "base")
     language = request.form.get("language", "auto")
     initial_prompt = request.form.get("prompt", "").strip()
+    diarize = request.form.get("diarize", "false").lower() in ("true", "1", "on")
 
     if model_name not in WHISPER_MODELS:
         model_name = "base"
@@ -503,7 +631,7 @@ def transcribe():
 
     thread = threading.Thread(
         target=_transcribe_worker,
-        args=(job_id, str(audio_path), model_name, language, initial_prompt),
+        args=(job_id, str(audio_path), model_name, language, initial_prompt, diarize),
         daemon=True,
     )
     thread.start()
@@ -681,6 +809,9 @@ def _generate_pdf(job_id: str):
     elif backend_label == "api":
         backend_label = "OpenAI API"
 
+    num_spk = result.get("num_speakers", 0)
+    spk_label = f"{num_spk} interlocutors" if num_spk else "No"
+
     meta_data = [
         [Paragraph("FITXER", s_meta_label), Paragraph(filename, s_meta_val),
          Paragraph("IDIOMA", s_meta_label), Paragraph(lang_display, s_meta_val)],
@@ -688,6 +819,8 @@ def _generate_pdf(job_id: str):
          Paragraph("BACKEND", s_meta_label), Paragraph(backend_label, s_meta_val)],
         [Paragraph("CARÀCTERS", s_meta_label), Paragraph(f"{result.get('chars', 0):,}", s_meta_val),
          Paragraph("SEGMENTS", s_meta_label), Paragraph(str(result.get("segments", 0)), s_meta_val)],
+        [Paragraph("DIARITZACIÓ", s_meta_label), Paragraph(spk_label, s_meta_val),
+         Paragraph("", s_meta_label), Paragraph("", s_meta_val)],
     ]
 
     col_w = (page_w - 2 * margin) / 4
@@ -705,15 +838,60 @@ def _generate_pdf(job_id: str):
     ]))
     story.append(meta_table)
 
+    SPEAKER_COLORS_PDF = [
+        colors.HexColor("#2563eb"),
+        colors.HexColor("#db2777"),
+        colors.HexColor("#059669"),
+        colors.HexColor("#d97706"),
+        colors.HexColor("#7c3aed"),
+        colors.HexColor("#ea580c"),
+        colors.HexColor("#0d9488"),
+        colors.HexColor("#c026d3"),
+    ]
+
+    s_speaker = ParagraphStyle(
+        "PDFSpeaker", parent=styles["Normal"],
+        fontSize=9, leading=13, textColor=BRAND_BLUE,
+        fontName="Helvetica-Bold", spaceBefore=4 * mm, spaceAfter=1 * mm,
+    )
+
     story.append(Paragraph("Transcripció completa", s_section))
 
     text = result.get("text", "")
-    paragraphs = text.split("\n")
-    for p in paragraphs:
-        p = p.strip()
-        if p:
-            p_escaped = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            story.append(Paragraph(p_escaped, s_body))
+    has_speakers = result.get("diarization", False)
+    speaker_color_map = {}
+    speaker_idx = 0
+
+    if has_speakers:
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            import re
+            m = re.match(r'^\[(.+?)\]$', line)
+            if m:
+                speaker = m.group(1)
+                if speaker not in speaker_color_map:
+                    speaker_color_map[speaker] = SPEAKER_COLORS_PDF[speaker_idx % len(SPEAKER_COLORS_PDF)]
+                    speaker_idx += 1
+                s_spk = ParagraphStyle(
+                    f"Spk_{speaker}", parent=s_speaker,
+                    textColor=speaker_color_map[speaker],
+                )
+                story.append(Paragraph(
+                    speaker.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
+                    s_spk,
+                ))
+            else:
+                p_escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                story.append(Paragraph(p_escaped, s_body))
+    else:
+        paragraphs = text.split("\n")
+        for p in paragraphs:
+            p = p.strip()
+            if p:
+                p_escaped = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                story.append(Paragraph(p_escaped, s_body))
 
     srt = result.get("srt", "")
     if srt.strip():
