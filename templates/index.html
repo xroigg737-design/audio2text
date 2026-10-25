@@ -628,14 +628,14 @@
     <div class="hint">Ajuda Whisper a reconèixer millor noms propis, sigles i vocabulari específic</div>
   </div>
 
-  <div class="diarize-toggle {% if not has_diarization %}disabled{% endif %}" title="{% if not has_diarization %}Configura HF_TOKEN per activar la diarització{% endif %}">
+  <div class="diarize-toggle {% if not has_diarization %}disabled{% endif %}" title="{% if not has_diarization %}Speechbrain no disponible{% endif %}">
     <div class="switch">
       <input type="checkbox" id="diarizeCheck" {% if not has_diarization %}disabled{% endif %}>
       <span class="slider"></span>
     </div>
     <div>
       <label for="diarizeCheck">Identificar interlocutors (Speaker Diarization)</label>
-      <div class="hint">{% if has_diarization %}Detecta automàticament qui parla a cada moment{% else %}Requereix HF_TOKEN — configura'l al fitxer .env{% endif %}</div>
+      <div class="hint">{% if has_diarization %}Detecta automàticament qui parla a cada moment (afegeix temps extra de procés){% else %}Requereix speechbrain — instal·la'l amb pip{% endif %}</div>
     </div>
   </div>
 

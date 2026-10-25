@@ -48,83 +48,135 @@ try:
 except ImportError:
     pass
 
-# Speaker diarization with pyannote-audio
+# Speaker diarization with speechbrain (no token required)
 HAS_DIARIZATION = False
-_diarization_pipeline = None
-HF_TOKEN = os.getenv("HF_TOKEN", "")
+_speaker_model = None
 
 try:
-    from pyannote.audio import Pipeline as PyannotePipeline
-    if HF_TOKEN:
-        HAS_DIARIZATION = True
+    from speechbrain.inference.speaker import EncoderClassifier
+    HAS_DIARIZATION = True
 except ImportError:
-    pass
+    try:
+        from speechbrain.pretrained import EncoderClassifier
+        HAS_DIARIZATION = True
+    except ImportError:
+        pass
 
 
-def _get_diarization_pipeline():
-    global _diarization_pipeline
-    if _diarization_pipeline is None:
-        _diarization_pipeline = PyannotePipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=HF_TOKEN,
-        )
+def _get_speaker_model():
+    """Load or return cached speechbrain speaker embedding model."""
+    global _speaker_model
+    if _speaker_model is None:
+        try:
+            from speechbrain.inference.speaker import EncoderClassifier
+        except ImportError:
+            from speechbrain.pretrained import EncoderClassifier
         import torch
-        if torch.cuda.is_available():
-            _diarization_pipeline.to(torch.device("cuda"))
-    return _diarization_pipeline
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        _speaker_model = EncoderClassifier.from_hparams(
+            source="speechbrain/spkrec-ecapa-voxceleb",
+            savedir=str(Path(__file__).parent / ".speechbrain_cache"),
+            run_opts={"device": device},
+        )
+    return _speaker_model
 
 
-def _run_diarization(job_id: str, audio_path: str, audio_duration: float) -> list[dict]:
-    """Run speaker diarization and return list of {start, end, speaker}."""
-    _emit(job_id, "status", {"msg": "Identificant interlocutors (diarització)..."})
-    _start_progress(job_id, audio_duration, 8.0, "Diaritzant")
-
-    pipeline = _get_diarization_pipeline()
-    diarization = pipeline(audio_path)
-
-    speakers = []
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
-        speakers.append({
-            "start": turn.start,
-            "end": turn.end,
-            "speaker": speaker,
-        })
-    return speakers
+def _load_audio_as_tensor(audio_path: str):
+    """Load full audio file as mono tensor + sample rate using soundfile."""
+    import soundfile as sf
+    import torch
+    data, sr = sf.read(audio_path, dtype="float32")
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    return torch.from_numpy(data).unsqueeze(0), sr
 
 
-def _assign_speakers(whisper_segments: list[dict], diarization: list[dict]) -> list[dict]:
-    """Assign a speaker label to each whisper segment based on overlap with diarization."""
-    speaker_map = {}
-    speaker_counter = 0
+def _extract_audio_segment_from_tensor(waveform, sr: int, start: float, end: float):
+    """Extract a segment from a preloaded waveform tensor."""
+    frame_start = int(start * sr)
+    frame_end = int(end * sr)
+    return waveform[:, frame_start:frame_end]
 
-    for seg in whisper_segments:
-        seg_start = seg["start"]
-        seg_end = seg["end"]
-        seg_mid = (seg_start + seg_end) / 2
 
-        best_speaker = None
-        best_overlap = 0
+def _run_diarization(job_id: str, audio_path: str, audio_duration: float,
+                     segments: list[dict]) -> list[dict]:
+    """Run speaker diarization using speechbrain embeddings + clustering."""
+    import torch
+    import numpy as np
+    from sklearn.cluster import AgglomerativeClustering
 
-        for d in diarization:
-            overlap_start = max(seg_start, d["start"])
-            overlap_end = min(seg_end, d["end"])
-            overlap = max(0, overlap_end - overlap_start)
+    _emit(job_id, "status", {"msg": "Identificant interlocutors (extraient empremtes de veu)..."})
+    _start_progress(job_id, audio_duration, 6.0, "Diaritzant")
 
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_speaker = d["speaker"]
+    model = _get_speaker_model()
+    embeddings = []
+    valid_indices = []
 
-            if best_overlap == 0 and d["start"] <= seg_mid <= d["end"]:
-                best_speaker = d["speaker"]
-                best_overlap = 0.001
+    full_waveform, sr = _load_audio_as_tensor(audio_path)
 
-        if best_speaker and best_speaker not in speaker_map:
-            speaker_counter += 1
-            speaker_map[best_speaker] = f"Speaker {speaker_counter}"
+    for i, seg in enumerate(segments):
+        duration = seg["end"] - seg["start"]
+        if duration < 0.3:
+            continue
+        try:
+            chunk = _extract_audio_segment_from_tensor(full_waveform, sr, seg["start"], seg["end"])
+            if chunk.shape[1] < 4800:
+                continue
+            with torch.no_grad():
+                emb = model.encode_batch(chunk)
+                embeddings.append(emb.squeeze().cpu().numpy())
+                valid_indices.append(i)
+        except Exception:
+            continue
 
-        seg["speaker"] = speaker_map.get(best_speaker, "Speaker ?") if best_speaker else ""
+    if len(embeddings) < 2:
+        return segments
 
-    return whisper_segments
+    X = np.array(embeddings)
+    from sklearn.preprocessing import normalize
+    X = normalize(X)
+
+    best_n = 2
+    best_score = -1
+    max_speakers = min(8, len(X) - 1)
+
+    if len(X) >= 4:
+        from sklearn.metrics import silhouette_score
+        for n in range(2, max_speakers + 1):
+            try:
+                clustering = AgglomerativeClustering(
+                    n_clusters=n, metric="cosine", linkage="average"
+                )
+                labels = clustering.fit_predict(X)
+                if len(set(labels)) < 2:
+                    continue
+                score = silhouette_score(X, labels, metric="cosine")
+                if score > best_score:
+                    best_score = score
+                    best_n = n
+            except Exception:
+                break
+
+    clustering = AgglomerativeClustering(
+        n_clusters=best_n, metric="cosine", linkage="average"
+    )
+    labels = clustering.fit_predict(X)
+
+    label_map = {}
+    counter = 0
+    for idx, vi in enumerate(valid_indices):
+        raw_label = int(labels[idx])
+        if raw_label not in label_map:
+            counter += 1
+            label_map[raw_label] = f"Speaker {counter}"
+        segments[vi]["speaker"] = label_map[raw_label]
+
+    for seg in segments:
+        if "speaker" not in seg:
+            seg["speaker"] = ""
+
+    _emit(job_id, "status", {"msg": f"Detectats {best_n} interlocutors"})
+    return segments
 
 # Speed factors with faster-whisper + GPU (much faster than original whisper on CPU)
 MODEL_SPEED_GPU = {
@@ -516,12 +568,9 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
         if diarize and HAS_DIARIZATION and segments:
             try:
                 diar_audio = processed_path if os.path.exists(processed_path) else audio_path
-                diarization_result = _run_diarization(job_id, diar_audio, audio_duration)
-                if diarization_result:
-                    segments = _assign_speakers(segments, diarization_result)
-                    unique_speakers = set(s.get("speaker", "") for s in segments if s.get("speaker"))
-                    num_speakers = len(unique_speakers)
-                    _emit(job_id, "status", {"msg": f"Detectats {num_speakers} interlocutors"})
+                segments = _run_diarization(job_id, diar_audio, audio_duration, segments)
+                unique_speakers = set(s.get("speaker", "") for s in segments if s.get("speaker"))
+                num_speakers = len(unique_speakers)
             except Exception as e:
                 print(f"[DIARIZE] Error: {e}")
                 _emit(job_id, "status", {"msg": f"Diarització fallida: {e}. Continuant sense speakers..."})
