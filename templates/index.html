@@ -975,7 +975,7 @@ async function loadHistory() {
     const list = $('historyList');
     if (items.length === 0) { area.style.display = 'none'; return; }
     area.style.display = 'block';
-    list.innerHTML = items.map(it => {
+    list.innerHTML = items.map((it, i) => {
       const parts = [];
       if (it.date) parts.push(it.date);
       if (it.model) parts.push(it.model);
@@ -983,7 +983,7 @@ async function loadHistory() {
       if (it.duration) parts.push(it.duration);
       return `
       <div class="history-item" onclick="loadJob('${it.id}')">
-        <span class="name">${it.filename}</span>
+        <span class="name">${i === 0 ? '<span style="font-size:0.7rem;font-weight:700;color:#2dd4bf;background:rgba(45,212,191,0.15);padding:2px 6px;border-radius:4px;margin-right:8px">ÚLTIMA</span>' : ''}${esc(it.filename)}</span>
         <span class="info">${parts.join(' · ')}</span>
       </div>`;
     }).join('');

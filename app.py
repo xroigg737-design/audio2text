@@ -33,7 +33,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -1508,8 +1508,17 @@ def _generate_notes_pdf(job_id: str):
 
 @app.route("/history")
 def history():
+    from datetime import datetime
+
     items = []
-    for job_id, job in sorted(jobs.items(), reverse=True):
+    def _job_date(item):
+        try:
+            return datetime.strptime(item[1].get("date", ""), "%d/%m/%Y %H:%M")
+        except ValueError:
+            return datetime.min
+
+    # Newest first (job ids are random, so sort by date)
+    for job_id, job in sorted(jobs.items(), key=_job_date, reverse=True):
         if job["status"] == "done":
             items.append({
                 "id": job_id,
