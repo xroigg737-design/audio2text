@@ -595,12 +595,12 @@
   </div>
 
   <div class="options">
-    <div {% if not has_local %}style="opacity:0.4;pointer-events:none" title="Només disponible amb Whisper local"{% endif %}>
-      <label>Model Whisper {% if not has_local %}(no disponible){% endif %}</label>
+    <div>
+      <label>{% if has_local %}Model Whisper{% else %}Model OpenAI{% endif %}</label>
       <select id="modelSelect">
         {% for m in models %}
-        <option value="{{ m }}" {% if m == 'base' %}selected{% endif %}>
-          {{ m }}{% if m == 'tiny' %} (ràpid){% elif m == 'base' %} (recomanat){% elif m == 'large' %} (millor qualitat){% endif %}
+        <option value="{{ m }}" {% if m == 'base' or m == 'gpt-transcribe' %}selected{% endif %}>
+          {{ m }}{% if m == 'tiny' %} (ràpid){% elif m == 'base' %} (recomanat){% elif m == 'large' %} (millor qualitat){% elif m == 'gpt-transcribe' %} (màxima qualitat, temps aproximats){% elif m == 'whisper-1' %} (temps exactes al SRT){% endif %}
         </option>
         {% endfor %}
       </select>

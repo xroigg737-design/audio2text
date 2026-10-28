@@ -7,6 +7,7 @@ Uses faster-whisper with GPU when available, falls back to OpenAI Whisper API.
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -27,9 +28,12 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", ".aac", ".opus"}
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
+# OpenAI API models: gpt-transcribe is more accurate but returns no timestamps
+API_MODELS = ["gpt-transcribe", "whisper-1"]
+API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -494,30 +498,12 @@ def _compress_for_api(job_id: str, audio_path: str) -> str:
     return compressed
 
 
-def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration: float):
-    """Transcribe using OpenAI Whisper API."""
+def _api_post(data: dict, audio_path: str) -> dict:
     import httpx
 
-    audio_path = _compress_for_api(job_id, audio_path)
-
-    _emit(job_id, "progress", {
-        "pct": 0,
-        "msg": f"Enviant a l'API d'OpenAI ({_format_duration(audio_duration)} d'àudio)...",
-    })
-    _start_progress(job_id, audio_duration, API_SPEED, "Transcrivint via API")
-
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
-
     with open(audio_path, "rb") as af:
         files = {"file": (Path(audio_path).name, af, "audio/mpeg")}
-        data = {
-            "model": "whisper-1",
-            "response_format": "verbose_json",
-            "timestamp_granularities[]": "segment",
-        }
-        if language != "auto":
-            data["language"] = language
-
         resp = httpx.post(
             "https://api.openai.com/v1/audio/transcriptions",
             headers=headers,
@@ -525,18 +511,83 @@ def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration:
             data=data,
             timeout=600,
         )
-
     if resp.status_code != 200:
         raise RuntimeError(f"API error ({resp.status_code}): {resp.text[:300]}")
+    return resp.json()
 
-    result = resp.json()
-    detected_lang = result.get("language", "unknown")
-    segments = [
-        {"start": seg.get("start", 0), "end": seg.get("end", 0), "text": seg.get("text", "")}
-        for seg in result.get("segments", [])
+
+def _split_sentences(text: str, start: float, end: float) -> list[dict]:
+    """Split chunk text into sentences with timestamps estimated by text length."""
+    parts = [p.strip() for p in re.split(r"(?<=[.!?…])\s+", text.strip()) if p.strip()]
+    total = sum(len(p) for p in parts) or 1
+    segments, t = [], start
+    for p in parts:
+        dt = (end - start) * len(p) / total
+        segments.append({"start": t, "end": t + dt, "text": " " + p})
+        t += dt
+    return segments
+
+
+def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration: float,
+                    model_name: str = "gpt-transcribe", initial_prompt: str = ""):
+    """Transcribe using the OpenAI transcription API."""
+    _start_progress(job_id, audio_duration, API_SPEED, f"Transcrivint via API ({model_name})")
+
+    if model_name == "whisper-1":
+        audio_path = _compress_for_api(job_id, audio_path)
+        _emit(job_id, "progress", {
+            "pct": 0,
+            "msg": f"Enviant a l'API d'OpenAI ({_format_duration(audio_duration)} d'àudio)...",
+        })
+        data = {
+            "model": "whisper-1",
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "segment",
+        }
+        if language != "auto":
+            data["language"] = language
+        if initial_prompt:
+            data["prompt"] = initial_prompt[:800]  # whisper-1 only uses ~224 tokens
+        result = _api_post(data, audio_path)
+        segments = [
+            {"start": seg.get("start", 0), "end": seg.get("end", 0), "text": seg.get("text", "")}
+            for seg in result.get("segments", [])
+        ]
+        return segments, result.get("language", language), audio_path, "api"
+
+    # gpt-transcribe: mono 16 kHz chunks, previous text tail as context for continuity
+    job_dir = Path(audio_path).parent
+    _emit(job_id, "status", {"msg": "Preparant l'àudio en trossos per l'API..."})
+    cmd = [
+        "ffmpeg", "-y", "-i", audio_path, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k",
+        "-f", "segment", "-segment_time", str(API_CHUNK_SECONDS),
+        str(job_dir / "chunk_%03d.mp3"),
     ]
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            timeout=max(300, int(audio_duration) + 60))
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg error: {result.stderr[:200]}")
+    chunks = sorted(job_dir.glob("chunk_*.mp3"))
 
-    return segments, detected_lang, audio_path, "api"
+    segments, prev_text = [], ""
+    for i, chunk in enumerate(chunks):
+        _emit(job_id, "status", {"msg": f"Transcrivint tros {i + 1} de {len(chunks)}..."})
+        prompt = initial_prompt
+        if prev_text:
+            prompt = (prompt + "\n\n" if prompt else "") + prev_text[-500:]
+        data = {"model": model_name, "response_format": "json"}
+        if language != "auto":
+            data["language"] = language
+        if prompt:
+            data["prompt"] = prompt
+        text = _api_post(data, str(chunk)).get("text", "").strip()
+        start = i * API_CHUNK_SECONDS
+        end = start + (_get_audio_duration(str(chunk)) or API_CHUNK_SECONDS)
+        segments.extend(_split_sentences(text, start, end))
+        prev_text = text
+        chunk.unlink()
+
+    return segments, language, audio_path, "api"
 
 
 def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: str,
@@ -557,7 +608,8 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
                                   initial_prompt)
         elif OPENAI_API_KEY:
             segments, detected_lang, processed_path, backend = \
-                _transcribe_api(job_id, audio_path, language, audio_duration)
+                _transcribe_api(job_id, audio_path, language, audio_duration,
+                                model_name, initial_prompt)
         else:
             raise RuntimeError(
                 "Ni Whisper local ni OPENAI_API_KEY disponibles. "
@@ -633,7 +685,7 @@ def index():
     return render_template(
         "index.html",
         version=APP_VERSION,
-        models=WHISPER_MODELS,
+        models=WHISPER_MODELS if HAS_LOCAL_WHISPER else API_MODELS,
         backend=backend,
         has_local=HAS_LOCAL_WHISPER,
         device=DEVICE.upper(),
@@ -654,13 +706,14 @@ def transcribe():
     if ext not in ALLOWED_EXTENSIONS:
         return jsonify({"error": f"Format no suportat: {ext}"}), 400
 
-    model_name = request.form.get("model", "base")
+    allowed_models = WHISPER_MODELS if HAS_LOCAL_WHISPER else API_MODELS
+    model_name = request.form.get("model", allowed_models[0])
     language = request.form.get("language", "auto")
     initial_prompt = request.form.get("prompt", "").strip()
     diarize = request.form.get("diarize", "false").lower() in ("true", "1", "on")
 
-    if model_name not in WHISPER_MODELS:
-        model_name = "base"
+    if model_name not in allowed_models:
+        model_name = "base" if HAS_LOCAL_WHISPER else API_MODELS[0]
 
     job_id = uuid.uuid4().hex[:12]
     job_dir = OUTPUT_DIR / job_id
