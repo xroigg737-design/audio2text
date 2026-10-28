@@ -33,7 +33,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.2"
+APP_VERSION = "3.3"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -1148,7 +1148,7 @@ def notes_status(job_id):
     job = jobs.get(job_id)
     if not job:
         return jsonify({"status": "error", "error": "Job no trobat"}), 404
-    status = job.get("notes_status", "none")
+    status = job.get("notes_status") or ("done" if "notes" in job else "none")
     if status == "done":
         return jsonify({"status": "done", "notes": job["notes"]})
     if status == "error":
