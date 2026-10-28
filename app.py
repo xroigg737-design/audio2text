@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 from flask import (Flask, Response, jsonify, render_template, request,
                    send_file, send_from_directory)
 
+import executive
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -33,7 +35,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -277,6 +279,12 @@ def _load_previous_jobs():
         }
         if notes:
             jobs[job_id]["notes"] = notes
+        exec_file = job_dir / "exec.json"
+        if exec_file.exists():
+            try:
+                jobs[job_id]["exec"] = json.loads(exec_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
 
 
 _load_previous_jobs()
@@ -1135,28 +1143,88 @@ def generate_notes(job_id):
         user_msg = f"CONTEXT IMPORTANT (proporcionat per l'usuari, és informació fiable):\n{context}\n\nUtilitza aquest context per identificar correctament els participants, els seus càrrecs i el motiu de la conversa.\n\n"
     user_msg += f"TRANSCRIPCIÓ (pot contenir errors de reconeixement de veu):\n\n{text}"
 
+    return _start_ai(job_id, "notes", NOTES_SYSTEM_PROMPT, user_msg)
+
+
+@app.route("/generate-exec/<job_id>", methods=["POST"])
+def generate_exec(job_id):
+    if job_id not in jobs or jobs[job_id]["status"] != "done":
+        return jsonify({"error": "Job no trobat o no completat"}), 404
+    if not OPENAI_API_KEY:
+        return jsonify({"error": "OPENAI_API_KEY no configurada"}), 500
+
+    result = jobs[job_id]["result"]
+    if not result.get("text", "").strip():
+        return jsonify({"error": "Transcripció buida"}), 400
+
+    context = request.json.get("context", "") if request.is_json else ""
+    approx = jobs[job_id].get("model") == "gpt-transcribe"
+    user_msg = ""
+    if context:
+        user_msg = f"CONTEXT DE L'USUARI (informació fiable):\n{context}\n\n"
+    if result.get("duration"):
+        user_msg += f"Durada de l'àudio: {result['duration']}\n"
+    user_msg += ("Les marques [mm:ss] són APROXIMADES (±1 min); escriu els temps amb '~'.\n"
+                 if approx else "Les marques [mm:ss] són exactes.\n")
+    user_msg += ("\nTRANSCRIPCIÓ AMB MARQUES DE TEMPS (pot contenir errors de reconeixement de veu):\n\n"
+                 + _timed_text(result.get("srt", ""), result.get("text", "")))
+    return _start_ai(job_id, "exec", executive.EXEC_SYSTEM_PROMPT, user_msg)
+
+
+def _timed_text(srt: str, fallback: str) -> str:
+    """Transcript as paragraphs of ~45 s, each prefixed with [mm:ss]."""
+    out, cur, cur_start = [], [], None
+    for block in srt.strip().split("\n\n"):
+        lines = block.strip().split("\n")
+        if len(lines) < 3 or "-->" not in lines[1]:
+            continue
+        h, m, rest = lines[1].split(" --> ")[0].split(":")
+        t = int(h) * 3600 + int(m) * 60 + float(rest.replace(",", "."))
+        if cur_start is None:
+            cur_start = t
+        cur.append(" ".join(lines[2:]).strip())
+        if t - cur_start >= 45:
+            out.append(f"[{int(cur_start // 60):02d}:{int(cur_start % 60):02d}] " + " ".join(cur))
+            cur, cur_start = [], None
+    if cur:
+        out.append(f"[{int(cur_start // 60):02d}:{int(cur_start % 60):02d}] " + " ".join(cur))
+    return "\n".join(out) if out else fallback
+
+
+def _start_ai(job_id: str, kind: str, system_prompt: str, user_msg: str):
     # Reasoning models can take several minutes: run in background, client polls
-    if jobs[job_id].get("notes_status") != "running":
-        jobs[job_id]["notes_status"] = "running"
-        jobs[job_id].pop("notes_error", None)
-        threading.Thread(target=_notes_worker, args=(job_id, user_msg), daemon=True).start()
+    if jobs[job_id].get(f"{kind}_status") != "running":
+        jobs[job_id][f"{kind}_status"] = "running"
+        jobs[job_id].pop(f"{kind}_error", None)
+        threading.Thread(target=_ai_worker, args=(job_id, kind, system_prompt, user_msg),
+                         daemon=True).start()
     return jsonify({"status": "running"})
 
 
 @app.route("/notes-status/<job_id>")
 def notes_status(job_id):
+    return _ai_status(job_id, "notes")
+
+
+@app.route("/exec-status/<job_id>")
+def exec_status(job_id):
+    return _ai_status(job_id, "exec")
+
+
+def _ai_status(job_id: str, kind: str):
     job = jobs.get(job_id)
     if not job:
         return jsonify({"status": "error", "error": "Job no trobat"}), 404
-    status = job.get("notes_status") or ("done" if "notes" in job else "none")
+    status = job.get(f"{kind}_status") or ("done" if kind in job else "none")
     if status == "done":
-        return jsonify({"status": "done", "notes": job["notes"]})
+        return jsonify({"status": "done", "notes": job[kind]})
     if status == "error":
-        return jsonify({"status": "error", "error": job.get("notes_error", "Error desconegut")})
+        return jsonify({"status": "error", "error": job.get(f"{kind}_error", "Error desconegut")})
     return jsonify({"status": status})
 
 
-def _notes_worker(job_id: str, user_msg: str):
+def _ai_worker(job_id: str, kind: str, system_prompt: str, user_msg: str):
+    """Run a JSON-producing LLM call in background; kind is 'notes' or 'exec'."""
     import httpx
 
     try:
@@ -1166,7 +1234,7 @@ def _notes_worker(job_id: str, user_msg: str):
             json={
                 "model": "gpt-6.1-sol",
                 "messages": [
-                    {"role": "system", "content": NOTES_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
                 "max_completion_tokens": 65000,
@@ -1175,22 +1243,22 @@ def _notes_worker(job_id: str, user_msg: str):
         )
 
         if resp.status_code != 200:
-            print(f"[NOTES] API error {resp.status_code}: {resp.text[:500]}")
+            print(f"[{kind.upper()}] API error {resp.status_code}: {resp.text[:500]}")
             raise RuntimeError(f"API error: {resp.text[:300]}")
 
         rjson = resp.json()
         job_dir = OUTPUT_DIR / job_id
         # Save full API response for debugging
-        (job_dir / "notes_api_response.json").write_text(
+        (job_dir / f"{kind}_api_response.json").write_text(
             json.dumps(rjson, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
         msg = rjson["choices"][0]["message"]
         raw = (msg.get("content") or "").strip()
-        print(f"[NOTES] content length={len(raw)}, keys={list(msg.keys())}")
+        print(f"[{kind.upper()}] content length={len(raw)}, keys={list(msg.keys())}")
 
         # Save raw response for debugging
-        (job_dir / "notes_raw.txt").write_text(raw, encoding="utf-8")
+        (job_dir / f"{kind}_raw.txt").write_text(raw, encoding="utf-8")
 
         # Extract JSON from response - reasoning models may wrap it
         content = raw
@@ -1207,27 +1275,43 @@ def _notes_worker(job_id: str, user_msg: str):
                 content = content[start:end]
 
         notes = json.loads(content)
-        jobs[job_id]["notes"] = notes
+        jobs[job_id][kind] = notes
 
         job_dir = OUTPUT_DIR / job_id
-        (job_dir / "notes.json").write_text(
+        (job_dir / f"{kind}.json").write_text(
             json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-        jobs[job_id]["notes_status"] = "done"
+        jobs[job_id][f"{kind}_status"] = "done"
 
     except json.JSONDecodeError as e:
         raw = locals().get("raw", "")
-        print(f"[NOTES] JSON parse error: {e}")
-        print(f"[NOTES] Raw content (first 500): {raw[:500] if raw else 'EMPTY'}")
-        jobs[job_id]["notes_error"] = "L'IA no ha retornat un format vàlid. Torna a intentar-ho."
-        jobs[job_id]["notes_status"] = "error"
+        print(f"[{kind.upper()}] JSON parse error: {e}")
+        print(f"[{kind.upper()}] Raw content (first 500): {raw[:500] if raw else 'EMPTY'}")
+        jobs[job_id][f"{kind}_error"] = "L'IA no ha retornat un format vàlid. Torna a intentar-ho."
+        jobs[job_id][f"{kind}_status"] = "error"
     except Exception as e:
         import traceback
-        print(f"[NOTES] Exception: {traceback.format_exc()}")
-        jobs[job_id]["notes_error"] = str(e) or type(e).__name__
-        jobs[job_id]["notes_status"] = "error"
+        print(f"[{kind.upper()}] Exception: {traceback.format_exc()}")
+        jobs[job_id][f"{kind}_error"] = str(e) or type(e).__name__
+        jobs[job_id][f"{kind}_status"] = "error"
 
+
+
+@app.route("/download/<job_id>/exec-pdf")
+def download_exec_pdf(job_id):
+    from datetime import datetime
+
+    job = jobs.get(job_id, {})
+    if "exec" not in job:
+        return "No disponible", 404
+    job_dir = OUTPUT_DIR / job_id
+    stem = Path(job.get("filename", "audio")).stem
+    footer = f"CONFIDENCIAL · {stem} · Informe generat amb Audio2Text a partir d'una transcripció automàtica · " \
+             + datetime.now().strftime("%d/%m/%Y")
+    executive.render_executive_pdf(job["exec"], str(job_dir / "exec.pdf"), footer)
+    return send_from_directory(str(job_dir), "exec.pdf", as_attachment=True,
+                               download_name=f"{stem} - Informe executiu.pdf")
 
 
 @app.route("/download/<job_id>/notes-pdf")

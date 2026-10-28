@@ -687,7 +687,9 @@
     </div>
 
     <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border)">
+      <button class="btn-sm btn-notes" id="btnGenExec">&#128202; Informe executiu PDF</button>
       <button class="btn-sm btn-notes" id="btnGenNotes">&#9998; Generar Apunts amb IA</button>
+      <div id="execStatus" style="display:none;margin-top:12px;font-size:0.9rem"></div>
     </div>
   </div>
 
@@ -912,6 +914,7 @@ function showResults(d, jobId) {
   $('notesArea').style.display = 'none';
   $('btnGenNotes').disabled = false;
   $('btnGenNotes').textContent = '✎ Generar Apunts amb IA';
+  resetExec();
   $('metaLang').textContent = 'Idioma: ' + d.language;
   $('metaDuration').textContent = 'Temps: ' + d.duration;
   $('metaChars').textContent = d.chars.toLocaleString() + ' caràcters';
@@ -994,7 +997,7 @@ async function loadJob(id) {
   try {
     const res = await fetch(`${BASE}/job/${id}`);
     const data = await res.json();
-    if (data.status === 'done') { showResults(data.result, id); restoreNotes(id); }
+    if (data.status === 'done') { showResults(data.result, id); restoreNotes(id); restoreExec(id); }
   } catch(e) {}
 }
 
@@ -1054,6 +1057,80 @@ async function waitForNotes(jobId) {
   } catch (e) {
     showNotesError(e);
   }
+}
+
+// Executive report (landscape PDF deck)
+$('btnGenExec').addEventListener('click', async () => {
+  if (!currentJobId) return;
+  if ($('btnGenExec').dataset.ready === '1') {
+    window.location.href = `${BASE}/download/${currentJobId}/exec-pdf`;
+    return;
+  }
+  try {
+    const res = await fetch(`${BASE}/generate-exec/${currentJobId}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({context: $('promptInput').value}),
+    });
+    const start = await res.json().catch(() => ({error: `Error del servidor (${res.status})`}));
+    if (start.error) throw new Error(start.error);
+    waitForExec(currentJobId);
+  } catch (e) {
+    showExecError(e);
+  }
+});
+
+function resetExec() {
+  const btn = $('btnGenExec');
+  btn.disabled = false;
+  btn.dataset.ready = '';
+  btn.innerHTML = '&#128202; Informe executiu PDF';
+  $('execStatus').style.display = 'none';
+}
+
+function showExecError(e) {
+  resetExec();
+  $('execStatus').style.display = 'block';
+  $('execStatus').innerHTML = `<span style="color:var(--error)">Error: ${esc(e.message)}</span>`;
+}
+
+function showExecReady(jobId) {
+  const btn = $('btnGenExec');
+  btn.disabled = false;
+  btn.dataset.ready = '1';
+  btn.innerHTML = '&#8615; Descarregar Informe executiu';
+  $('execStatus').style.display = 'block';
+  $('execStatus').innerHTML = `✔ Informe executiu llest · <a href="#" id="execRegen" style="color:var(--accent)">tornar-lo a generar</a>`;
+  $('execRegen').onclick = (ev) => { ev.preventDefault(); btn.dataset.ready = ''; btn.click(); };
+}
+
+async function waitForExec(jobId) {
+  const btn = $('btnGenExec');
+  btn.disabled = true;
+  btn.textContent = 'Generant informe...';
+  $('execStatus').style.display = 'block';
+  const t0 = Date.now();
+  try {
+    while (currentJobId === jobId) {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      $('execStatus').innerHTML = `<span class="spinner" style="display:inline-block;vertical-align:middle;margin-right:8px"></span>Preparant l'informe executiu amb IA... (${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}) · pot trigar uns minuts`;
+      await new Promise(r => setTimeout(r, 5000));
+      const st = await fetch(`${BASE}/exec-status/${jobId}`).then(r => r.json()).catch(() => ({status: 'running'}));
+      if (currentJobId !== jobId) return;
+      if (st.status === 'done') { showExecReady(jobId); return; }
+      if (st.status === 'error' || st.status === 'none') throw new Error(st.error || 'Generació interrompuda');
+    }
+  } catch (e) {
+    showExecError(e);
+  }
+}
+
+async function restoreExec(jobId) {
+  resetExec();
+  const st = await fetch(`${BASE}/exec-status/${jobId}`).then(r => r.json()).catch(() => ({}));
+  if (currentJobId !== jobId) return;
+  if (st.status === 'done') showExecReady(jobId);
+  else if (st.status === 'running') waitForExec(jobId);
 }
 
 // When opening a job, show notes already generated (they are saved on the server)
