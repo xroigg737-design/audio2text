@@ -33,7 +33,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.1"
+APP_VERSION = "3.2"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -198,6 +198,7 @@ MODEL_SPEED_CPU = {
     "large": 1.0,
 }
 API_SPEED = 3.0
+NOTES_TIMEOUT = 1200  # seconds; reasoning models are slow on long transcripts
 
 # faster-whisper model name mapping
 FASTER_WHISPER_NAMES = {
@@ -1123,8 +1124,6 @@ def generate_notes(job_id):
     if not OPENAI_API_KEY:
         return jsonify({"error": "OPENAI_API_KEY no configurada"}), 500
 
-    import httpx
-
     text = jobs[job_id]["result"].get("text", "")
     if not text.strip():
         return jsonify({"error": "Transcripció buida"}), 400
@@ -1135,6 +1134,30 @@ def generate_notes(job_id):
     if context:
         user_msg = f"CONTEXT IMPORTANT (proporcionat per l'usuari, és informació fiable):\n{context}\n\nUtilitza aquest context per identificar correctament els participants, els seus càrrecs i el motiu de la conversa.\n\n"
     user_msg += f"TRANSCRIPCIÓ (pot contenir errors de reconeixement de veu):\n\n{text}"
+
+    # Reasoning models can take several minutes: run in background, client polls
+    if jobs[job_id].get("notes_status") != "running":
+        jobs[job_id]["notes_status"] = "running"
+        jobs[job_id].pop("notes_error", None)
+        threading.Thread(target=_notes_worker, args=(job_id, user_msg), daemon=True).start()
+    return jsonify({"status": "running"})
+
+
+@app.route("/notes-status/<job_id>")
+def notes_status(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "error", "error": "Job no trobat"}), 404
+    status = job.get("notes_status", "none")
+    if status == "done":
+        return jsonify({"status": "done", "notes": job["notes"]})
+    if status == "error":
+        return jsonify({"status": "error", "error": job.get("notes_error", "Error desconegut")})
+    return jsonify({"status": status})
+
+
+def _notes_worker(job_id: str, user_msg: str):
+    import httpx
 
     try:
         resp = httpx.post(
@@ -1148,12 +1171,12 @@ def generate_notes(job_id):
                 ],
                 "max_completion_tokens": 65000,
             },
-            timeout=300,
+            timeout=NOTES_TIMEOUT,
         )
 
         if resp.status_code != 200:
             print(f"[NOTES] API error {resp.status_code}: {resp.text[:500]}")
-            return jsonify({"error": f"API error: {resp.text[:300]}"}), 500
+            raise RuntimeError(f"API error: {resp.text[:300]}")
 
         rjson = resp.json()
         job_dir = OUTPUT_DIR / job_id
@@ -1191,16 +1214,20 @@ def generate_notes(job_id):
             json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
-        return jsonify(notes)
+        jobs[job_id]["notes_status"] = "done"
 
     except json.JSONDecodeError as e:
+        raw = locals().get("raw", "")
         print(f"[NOTES] JSON parse error: {e}")
         print(f"[NOTES] Raw content (first 500): {raw[:500] if raw else 'EMPTY'}")
-        return jsonify({"error": "L'IA no ha retornat un format vàlid. Torna a intentar-ho."}), 500
+        jobs[job_id]["notes_error"] = "L'IA no ha retornat un format vàlid. Torna a intentar-ho."
+        jobs[job_id]["notes_status"] = "error"
     except Exception as e:
         import traceback
         print(f"[NOTES] Exception: {traceback.format_exc()}")
-        return jsonify({"error": str(e)}), 500
+        jobs[job_id]["notes_error"] = str(e) or type(e).__name__
+        jobs[job_id]["notes_status"] = "error"
+
 
 
 @app.route("/download/<job_id>/notes-pdf")
