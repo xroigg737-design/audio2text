@@ -35,7 +35,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.5"
+APP_VERSION = "3.6"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -1162,8 +1162,10 @@ def generate_exec(job_id):
     user_msg = ""
     if context:
         user_msg = f"CONTEXT DE L'USUARI (informació fiable):\n{context}\n\n"
-    if result.get("duration"):
-        user_msg += f"Durada de l'àudio: {result['duration']}\n"
+    ends = re.findall(r"--> (\d+):(\d+):(\d+)", result.get("srt", ""))
+    if ends:
+        h, m, sec = map(int, ends[-1])
+        user_msg += f"Durada de l'àudio: {h * 60 + m} min {sec} s\n"
     user_msg += ("Les marques [mm:ss] són APROXIMADES (±1 min); escriu els temps amb '~'.\n"
                  if approx else "Les marques [mm:ss] són exactes.\n")
     user_msg += ("\nTRANSCRIPCIÓ AMB MARQUES DE TEMPS (pot contenir errors de reconeixement de veu):\n\n"

@@ -1,5 +1,6 @@
 """Executive report: landscape, card-based PDF deck generated from a transcript."""
 
+import re
 from xml.sax.saxutils import escape
 
 EXEC_SYSTEM_PROMPT = """Ets un consultor sènior d'estratègia que converteix la transcripció d'una reunió en un INFORME EXECUTIU en format presentació (pàgines apaïsades amb targetes), pensat perquè un directiu el llegeixi en 5 minuts.
@@ -13,6 +14,8 @@ PRINCIPIS
 - No inventis res. Si un nom propi pot estar mal transcrit, marca'l amb * i inclou-lo a la pàgina de verificació.
 - Les xifres són orientatives tal com es diuen; indica-ho quan calgui ("prop del milió anual", interpretat en euros, a validar).
 - Quan citis un moment concret, posa'n el temps entre parèntesis (mm:ss) a partir de les marques [mm:ss] de la transcripció.
+- Els prefixos R:/P:/I:/V: van només als paràgrafs d'anàlisi. NO els posis a vinyetes (•), llistes numerades, línies "Resultat:", línies de focus en majúscules ni a les preguntes: en aquestes targetes la naturalesa ja la indica el títol o el subtítol.
+- Títols de pàgina curts: màxim 60 caràcters.
 - Mateix idioma que la transcripció.
 - Si el context de l'usuari diu qui és el destinatari (p. ex. el nou CIO), orienta les propostes a ell.
 
@@ -84,6 +87,8 @@ def _fonts():
 def _rich(text: str, bold: str) -> str:
     """Escape text and highlight a leading R:/P:/I:/V: tag."""
     t = escape(str(text))
+    # Tags are noise on list items ("I: • ...", "I: 1. ...")
+    t = re.sub(r"^[RPIV]: (?=•|\d+\.|Resultat:)", "", t)
     for tag in ("R:", "P:", "I:", "V:"):
         if t.startswith(tag):
             color = AMBER if tag in ("P:", "V:") else TEAL
