@@ -35,7 +35,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.8"
+APP_VERSION = "3.9"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -1309,11 +1309,11 @@ def download_exec_pdf(job_id):
         return "No disponible", 404
     job_dir = OUTPUT_DIR / job_id
     stem = Path(job.get("filename", "audio")).stem
-    footer = f"CONFIDENCIAL · {stem} · Resum generat amb Audio2Text a partir d'una transcripció automàtica · " \
+    footer = f"CONFIDENCIAL · {stem} · Informe generat amb Audio2Text a partir d'una transcripció automàtica · " \
              + datetime.now().strftime("%d/%m/%Y")
     executive.render_executive_pdf(job["exec"], str(job_dir / "exec.pdf"), footer)
     return send_from_directory(str(job_dir), "exec.pdf", as_attachment=True,
-                               download_name=f"{stem} - Resum executiu CIO.pdf")
+                               download_name=f"{stem} - Informe executiu CIO.pdf")
 
 
 @app.route("/download/<job_id>/notes-pdf")
