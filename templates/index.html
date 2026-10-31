@@ -687,7 +687,7 @@
     </div>
 
     <div style="margin-top:16px; padding-top:16px; border-top:1px solid var(--border)">
-      <button class="btn-sm btn-notes" id="btnGenExec">&#128202; Informe executiu PDF</button>
+      <button class="btn-sm btn-notes" id="btnGenExec">&#128202; Resum executiu CIO</button>
       <button class="btn-sm btn-notes" id="btnGenNotes">&#9998; Generar Apunts amb IA</button>
       <div id="execStatus" style="display:none;margin-top:12px;font-size:0.9rem"></div>
     </div>
@@ -1084,7 +1084,7 @@ function resetExec() {
   const btn = $('btnGenExec');
   btn.disabled = false;
   btn.dataset.ready = '';
-  btn.innerHTML = '&#128202; Informe executiu PDF';
+  btn.innerHTML = '&#128202; Resum executiu CIO';
   $('execStatus').style.display = 'none';
 }
 
@@ -1098,9 +1098,9 @@ function showExecReady(jobId) {
   const btn = $('btnGenExec');
   btn.disabled = false;
   btn.dataset.ready = '1';
-  btn.innerHTML = '&#8615; Descarregar Informe executiu';
+  btn.innerHTML = '&#8615; Descarregar Resum CIO';
   $('execStatus').style.display = 'block';
-  $('execStatus').innerHTML = `✔ Informe executiu llest · <a href="#" id="execRegen" style="color:var(--accent)">tornar-lo a generar</a>`;
+  $('execStatus').innerHTML = `✔ Resum executiu CIO llest · <a href="#" id="execRegen" style="color:var(--accent)">tornar-lo a generar</a>`;
   $('execRegen').onclick = (ev) => { ev.preventDefault(); btn.dataset.ready = ''; btn.click(); };
 }
 
@@ -1113,7 +1113,7 @@ async function waitForExec(jobId) {
   try {
     while (currentJobId === jobId) {
       const s = Math.floor((Date.now() - t0) / 1000);
-      $('execStatus').innerHTML = `<span class="spinner" style="display:inline-block;vertical-align:middle;margin-right:8px"></span>Preparant l'informe executiu amb IA... (${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}) · pot trigar uns minuts`;
+      $('execStatus').innerHTML = `<span class="spinner" style="display:inline-block;vertical-align:middle;margin-right:8px"></span>Preparant el resum executiu CIO amb IA... (${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}) · pot trigar uns minuts`;
       await new Promise(r => setTimeout(r, 5000));
       const st = await fetch(`${BASE}/exec-status/${jobId}`).then(r => r.json()).catch(() => ({status: 'running'}));
       if (currentJobId !== jobId) return;
