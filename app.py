@@ -28,14 +28,14 @@ app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", ".aac", ".opus"}
+ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".wma", ".aac", ".opus", ".mp4", ".avi", ".mkv", ".mov"}
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 # OpenAI API models: gpt-transcribe is more accurate but returns no timestamps
 API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.6"
+APP_VERSION = "3.7"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
