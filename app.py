@@ -35,7 +35,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "3.9"
+APP_VERSION = "4.0"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -283,6 +283,13 @@ def _load_previous_jobs():
         if exec_file.exists():
             try:
                 jobs[job_id]["exec"] = json.loads(exec_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        clean_file = job_dir / "clean.txt"
+        if clean_file.exists():
+            try:
+                jobs[job_id]["clean"] = clean_file.read_text(encoding="utf-8")
             except Exception:
                 pass
 
@@ -1040,6 +1047,24 @@ def _generate_pdf(job_id: str):
     return send_file(str(pdf_path), as_attachment=True, download_name=download_name)
 
 
+CLEAN_SYSTEM_PROMPT = """Ets un editor expert en transcripcions d'àudio. La teva feina és NETEJAR una transcripció bruta generada per Whisper, convertint-la en un text llegible i fidel.
+
+REGLES:
+1. ELIMINA soroll: converses amb cambrers, comandes de menjar/beguda, interjeccions buides ("eh", "mm", "o sigui"), repeticions sense contingut ("no, no, no"), onomatopeies, fragments inaudibles o sense sentit.
+2. CORREGEIX noms propis: utilitza el CONTEXT proporcionat per l'usuari per corregir noms de persones, empreses, tecnologies, llocs. Si un nom és dubtós i no apareix al context, marca'l amb [?].
+3. IDENTIFICA SPEAKERS: si el context diu qui participa, assigna els noms reals (p.ex. "Lluís:" en lloc de "Speaker 1:"). Si no pots determinar qui parla, deixa "Speaker X:".
+4. ESTRUCTURA en paràgrafs temàtics: agrupa les intervencions per blocs de conversa coherents, separats per línies en blanc. Cada canvi de tema hauria de ser un paràgraf nou.
+5. MANTÉ EL CONTINGUT FIDEL: no inventis, no resumeixis, no parafrasejis. El text net ha de contenir TOTA la informació rellevant de l'original, però llegible.
+6. CORREGEIX gramàtica i puntuació: afegeix punts, comes, majúscules correctament. Respecta l'idioma original (català, castellà o barreja).
+7. MARCA amb [?] qualsevol element dubtós: noms que no pots verificar, xifres ambigües, fragments poc clars.
+
+FORMAT DE SORTIDA:
+- Text pla, amb salts de línia entre paràgrafs temàtics
+- Si hi ha múltiples interlocutors, cada intervenció comença amb "Nom:" (p.ex. "Lluís: El que t'explico és que...")
+- NO retornis JSON, retorna TEXT PLA directament
+- Mateix idioma que l'original"""
+
+
 NOTES_SYSTEM_PROMPT = """Ets un analista sènior que crea informes de KNOWLEDGE TRANSFER exhaustius.
 La teva feina NO és resumir. La teva feina és EXTREURE I DOCUMENTAR absolutament tot el que es diu a la conversa perquè serveixi com a referència completa.
 
@@ -1124,8 +1149,8 @@ RECORDA:
 - Quan no estiguis segur d'un nom propi, posa-ho entre [claudàtors] indicant que pot ser un error de transcripció"""
 
 
-@app.route("/generate-notes/<job_id>", methods=["POST"])
-def generate_notes(job_id):
+@app.route("/clean-transcript/<job_id>", methods=["POST"])
+def clean_transcript(job_id):
     if job_id not in jobs or jobs[job_id]["status"] != "done":
         return jsonify({"error": "Job no trobat o no completat"}), 404
 
@@ -1140,8 +1165,49 @@ def generate_notes(job_id):
 
     user_msg = ""
     if context:
+        user_msg = f"CONTEXT (informació fiable proporcionada per l'usuari, fes-la servir per corregir noms, identificar speakers i entendre el tema):\n{context}\n\n"
+    user_msg += f"TRANSCRIPCIÓ BRUTA A NETEJAR:\n\n{text}"
+
+    return _start_ai(job_id, "clean", CLEAN_SYSTEM_PROMPT, user_msg)
+
+
+@app.route("/clean-status/<job_id>")
+def clean_status(job_id):
+    return _ai_status(job_id, "clean")
+
+
+@app.route("/download/<job_id>/clean-txt")
+def download_clean_txt(job_id):
+    job = jobs.get(job_id)
+    if not job or "clean" not in job:
+        return "No disponible", 404
+    job_dir = OUTPUT_DIR / job_id
+    clean_path = job_dir / "clean.txt"
+    if not clean_path.exists():
+        return "No disponible", 404
+    return send_from_directory(str(job_dir), "clean.txt", as_attachment=True)
+
+
+@app.route("/generate-notes/<job_id>", methods=["POST"])
+def generate_notes(job_id):
+    if job_id not in jobs or jobs[job_id]["status"] != "done":
+        return jsonify({"error": "Job no trobat o no completat"}), 404
+
+    if not OPENAI_API_KEY:
+        return jsonify({"error": "OPENAI_API_KEY no configurada"}), 500
+
+    clean = jobs[job_id].get("clean")
+    text = clean or jobs[job_id]["result"].get("text", "")
+    if not text.strip():
+        return jsonify({"error": "Transcripció buida"}), 400
+
+    context = request.json.get("context", "") if request.is_json else ""
+
+    user_msg = ""
+    if context:
         user_msg = f"CONTEXT IMPORTANT (proporcionat per l'usuari, és informació fiable):\n{context}\n\nUtilitza aquest context per identificar correctament els participants, els seus càrrecs i el motiu de la conversa.\n\n"
-    user_msg += f"TRANSCRIPCIÓ (pot contenir errors de reconeixement de veu):\n\n{text}"
+    source = "TRANSCRIPCIÓ NETEJADA" if clean else "TRANSCRIPCIÓ (pot contenir errors de reconeixement de veu)"
+    user_msg += f"{source}:\n\n{text}"
 
     return _start_ai(job_id, "notes", NOTES_SYSTEM_PROMPT, user_msg)
 
@@ -1219,14 +1285,15 @@ def _ai_status(job_id: str, kind: str):
         return jsonify({"status": "error", "error": "Job no trobat"}), 404
     status = job.get(f"{kind}_status") or ("done" if kind in job else "none")
     if status == "done":
-        return jsonify({"status": "done", "notes": job[kind]})
+        key = "text" if kind == "clean" else "notes"
+        return jsonify({"status": "done", key: job[kind]})
     if status == "error":
         return jsonify({"status": "error", "error": job.get(f"{kind}_error", "Error desconegut")})
     return jsonify({"status": status})
 
 
 def _ai_worker(job_id: str, kind: str, system_prompt: str, user_msg: str):
-    """Run a JSON-producing LLM call in background; kind is 'notes' or 'exec'."""
+    """Run an LLM call in background; kind is 'notes', 'exec' or 'clean'."""
     import httpx
 
     try:
@@ -1250,7 +1317,6 @@ def _ai_worker(job_id: str, kind: str, system_prompt: str, user_msg: str):
 
         rjson = resp.json()
         job_dir = OUTPUT_DIR / job_id
-        # Save full API response for debugging
         (job_dir / f"{kind}_api_response.json").write_text(
             json.dumps(rjson, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -1259,30 +1325,29 @@ def _ai_worker(job_id: str, kind: str, system_prompt: str, user_msg: str):
         raw = (msg.get("content") or "").strip()
         print(f"[{kind.upper()}] content length={len(raw)}, keys={list(msg.keys())}")
 
-        # Save raw response for debugging
         (job_dir / f"{kind}_raw.txt").write_text(raw, encoding="utf-8")
 
-        # Extract JSON from response - reasoning models may wrap it
-        content = raw
-        if "```json" in content:
-            content = content.split("```json", 1)[1].rsplit("```", 1)[0].strip()
-        elif "```" in content:
-            content = content.split("```", 1)[1].rsplit("```", 1)[0].strip()
+        if kind == "clean":
+            jobs[job_id][kind] = raw
+            (job_dir / "clean.txt").write_text(raw, encoding="utf-8")
+        else:
+            content = raw
+            if "```json" in content:
+                content = content.split("```json", 1)[1].rsplit("```", 1)[0].strip()
+            elif "```" in content:
+                content = content.split("```", 1)[1].rsplit("```", 1)[0].strip()
 
-        # Try to find JSON object if still not valid
-        if not content.startswith("{"):
-            start = content.find("{")
-            if start != -1:
-                end = content.rfind("}") + 1
-                content = content[start:end]
+            if not content.startswith("{"):
+                start = content.find("{")
+                if start != -1:
+                    end = content.rfind("}") + 1
+                    content = content[start:end]
 
-        notes = json.loads(content)
-        jobs[job_id][kind] = notes
-
-        job_dir = OUTPUT_DIR / job_id
-        (job_dir / f"{kind}.json").write_text(
-            json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+            notes = json.loads(content)
+            jobs[job_id][kind] = notes
+            (job_dir / f"{kind}.json").write_text(
+                json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
         jobs[job_id][f"{kind}_status"] = "done"
 
