@@ -652,6 +652,17 @@
     </div>
   </div>
 
+  <div class="diarize-toggle">
+    <div class="switch">
+      <input type="checkbox" id="denoiseCheck" {% if backend == 'local' %}checked{% endif %}>
+      <span class="slider"></span>
+    </div>
+    <div>
+      <label for="denoiseCheck">Reduir soroll de fons</label>
+      <div class="hint">Prova-ho activat i desactivat: amb àudios sorollosos, de vegades la transcripció encerta més sense filtre</div>
+    </div>
+  </div>
+
   <button class="btn" id="btnTranscribe" disabled>
     <span>&#9654;</span> Transcriure
   </button>
@@ -790,6 +801,7 @@ btn.addEventListener('click', async () => {
   form.append('language', $('langSelect').value);
   form.append('prompt', $('promptInput').value);
   if ($('diarizeCheck').checked) form.append('diarize', 'true');
+  if ($('denoiseCheck')) form.append('denoise', $('denoiseCheck').checked ? 'true' : 'false');
 
   try {
     const res = await fetch(`${BASE}/transcribe`, { method: 'POST', body: form });

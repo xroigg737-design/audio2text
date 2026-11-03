@@ -35,7 +35,7 @@ API_MODELS = ["gpt-transcribe", "whisper-1"]
 API_CHUNK_SECONDS = 600  # gpt-transcribe: split long audio to avoid truncated output
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-APP_VERSION = "4.0"
+APP_VERSION = "4.1"
 
 OPENAI_MAX_BYTES = 25 * 1024 * 1024  # 25 MB API limit
 
@@ -412,17 +412,22 @@ def _start_progress(job_id: str, audio_duration: float, speed_factor: float, pha
     return t
 
 
-def _preprocess_audio(job_id: str, audio_path: str, audio_duration: float = 0) -> str:
-    """Preprocess audio: normalize volume, reduce noise, convert to 16kHz mono WAV."""
+def _preprocess_audio(job_id: str, audio_path: str, audio_duration: float = 0,
+                      denoise: bool = True) -> str:
+    """Convert to 16kHz mono WAV. With denoise=True also filter noise and normalize volume.
+
+    Whisper is trained on raw noisy audio, so aggressive denoising can remove voice
+    information; denoise=False lets the user compare both versions.
+    """
     preprocessed = str(Path(audio_path).parent / "preprocessed.wav")
-    _emit(job_id, "status", {"msg": "Preprocessant àudio (normalitzant volum, reduint soroll)..."})
     timeout = max(180, int(audio_duration * 2) + 60)
-    cmd = [
-        "ffmpeg", "-y", "-i", audio_path,
-        "-af", "highpass=f=80,lowpass=f=8000,afftdn=nf=-20,loudnorm=I=-16:TP=-1.5:LRA=11",
-        "-ar", "16000", "-ac", "1",
-        preprocessed,
-    ]
+    cmd = ["ffmpeg", "-y", "-i", audio_path]
+    if denoise:
+        _emit(job_id, "status", {"msg": "Preprocessant àudio (normalitzant volum, reduint soroll)..."})
+        cmd += ["-af", "highpass=f=80,lowpass=f=8000,afftdn=nf=-20,loudnorm=I=-16:TP=-1.5:LRA=11"]
+    else:
+        _emit(job_id, "status", {"msg": "Preparant àudio (sense reducció de soroll)..."})
+    cmd += ["-ar", "16000", "-ac", "1", preprocessed]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         return audio_path
@@ -440,13 +445,14 @@ def _get_model(model_name: str) -> "WhisperModel":
 
 
 def _transcribe_local(job_id: str, audio_path: str, model_name: str, language: str,
-                       audio_duration: float, initial_prompt: str = ""):
+                       audio_duration: float, initial_prompt: str = "",
+                       denoise: bool = True):
     """Transcribe using faster-whisper with GPU if available."""
     device_label = "GPU" if DEVICE == "cuda" else "CPU"
     _emit(job_id, "status", {"msg": f"Carregant model '{model_name}' ({device_label})..."})
     model = _get_model(model_name)
 
-    processed_path = _preprocess_audio(job_id, audio_path, audio_duration)
+    processed_path = _preprocess_audio(job_id, audio_path, audio_duration, denoise)
 
     speed_table = MODEL_SPEED_GPU if DEVICE == "cuda" else MODEL_SPEED_CPU
     speed = speed_table.get(model_name, 5.0)
@@ -545,8 +551,11 @@ def _split_sentences(text: str, start: float, end: float) -> list[dict]:
 
 
 def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration: float,
-                    model_name: str = "gpt-transcribe", initial_prompt: str = ""):
+                    model_name: str = "gpt-transcribe", initial_prompt: str = "",
+                    denoise: bool = False):
     """Transcribe using the OpenAI transcription API."""
+    if denoise:
+        audio_path = _preprocess_audio(job_id, audio_path, audio_duration, True)
     _start_progress(job_id, audio_duration, API_SPEED, f"Transcrivint via API ({model_name})")
 
     if model_name == "whisper-1":
@@ -607,7 +616,9 @@ def _transcribe_api(job_id: str, audio_path: str, language: str, audio_duration:
 
 
 def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: str,
-                       initial_prompt: str = "", diarize: bool = False):
+                       initial_prompt: str = "", diarize: bool = False,
+                       denoise: bool | None = None):
+    # denoise=None keeps each backend's historical default (local: on, API: off)
     try:
         audio_duration = _get_audio_duration(audio_path)
         if audio_duration > 0:
@@ -621,11 +632,11 @@ def _transcribe_worker(job_id: str, audio_path: str, model_name: str, language: 
         if HAS_LOCAL_WHISPER:
             segments, detected_lang, processed_path, backend = \
                 _transcribe_local(job_id, audio_path, model_name, language, audio_duration,
-                                  initial_prompt)
+                                  initial_prompt, True if denoise is None else denoise)
         elif OPENAI_API_KEY:
             segments, detected_lang, processed_path, backend = \
                 _transcribe_api(job_id, audio_path, language, audio_duration,
-                                model_name, initial_prompt)
+                                model_name, initial_prompt, bool(denoise))
         else:
             raise RuntimeError(
                 "Ni Whisper local ni OPENAI_API_KEY disponibles. "
@@ -727,6 +738,8 @@ def transcribe():
     language = request.form.get("language", "auto")
     initial_prompt = request.form.get("prompt", "").strip()
     diarize = request.form.get("diarize", "false").lower() in ("true", "1", "on")
+    denoise_raw = request.form.get("denoise")
+    denoise = None if denoise_raw is None else denoise_raw.lower() in ("true", "1", "on")
 
     if model_name not in allowed_models:
         model_name = "base" if HAS_LOCAL_WHISPER else API_MODELS[0]
@@ -749,7 +762,7 @@ def transcribe():
 
     thread = threading.Thread(
         target=_transcribe_worker,
-        args=(job_id, str(audio_path), model_name, language, initial_prompt, diarize),
+        args=(job_id, str(audio_path), model_name, language, initial_prompt, diarize, denoise),
         daemon=True,
     )
     thread.start()
