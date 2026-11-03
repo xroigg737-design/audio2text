@@ -1670,6 +1670,65 @@ def _generate_notes_pdf(job_id: str):
     return send_file(str(pdf_path), as_attachment=True, download_name=download_name)
 
 
+@app.route("/paste-transcript", methods=["POST"])
+def paste_transcript():
+    """Accept a pasted transcript text and create a job as if it had been transcribed."""
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    title = (data.get("title") or "Text enganxat").strip()
+    if not text:
+        return jsonify({"error": "Cap text proporcionat"}), 400
+
+    from datetime import datetime
+
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = OUTPUT_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    (job_dir / "transcript.txt").write_text(text, encoding="utf-8")
+    srt_content = ""
+    (job_dir / "transcript.srt").write_text(srt_content, encoding="utf-8")
+
+    date_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+    meta = {
+        "model": "paste",
+        "language": "auto",
+        "detected_language": "auto",
+        "duration": "0s",
+        "backend": "paste",
+        "diarization": False,
+        "num_speakers": 0,
+        "date": date_str,
+    }
+    (job_dir / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    result = {
+        "text": text,
+        "srt": srt_content,
+        "language": "auto",
+        "duration": "0s",
+        "chars": len(text),
+        "segments": 0,
+        "backend": "paste",
+        "diarization": False,
+        "num_speakers": 0,
+    }
+
+    jobs[job_id] = {
+        "status": "done",
+        "filename": title,
+        "model": "paste",
+        "language": "auto",
+        "date": date_str,
+        "result": result,
+        "queue": queue.Queue(),
+    }
+
+    return jsonify({"job_id": job_id, "result": result})
+
+
 @app.route("/history")
 def history():
     from datetime import datetime

@@ -577,10 +577,96 @@
     color: #2dd4bf;
   }
 
+  /* Input mode tabs */
+  .input-mode-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+  }
+  .input-mode-tab {
+    flex: 1;
+    padding: 10px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: center;
+  }
+  .input-mode-tab.active {
+    background: rgba(122,175,255,0.1);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .input-mode-tab:hover:not(.active) {
+    border-color: rgba(122,175,255,0.4);
+    color: var(--text);
+  }
+
+  /* Paste area */
+  .paste-zone {
+    display: none;
+    margin-bottom: 20px;
+  }
+  .paste-zone textarea {
+    width: 100%;
+    min-height: 180px;
+    padding: 14px;
+    background: var(--surface);
+    border: 2px dashed rgba(122,175,255,0.3);
+    border-radius: 12px;
+    color: var(--text);
+    font-size: 0.9rem;
+    font-family: inherit;
+    line-height: 1.6;
+    outline: none;
+    resize: vertical;
+    transition: border-color 0.2s;
+  }
+  .paste-zone textarea:focus {
+    border-color: var(--accent);
+  }
+  .paste-zone .paste-title {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 10px;
+    align-items: center;
+  }
+  .paste-zone .paste-title input {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .paste-zone .paste-title input:focus { border-color: var(--accent); }
+  .paste-zone .paste-title label {
+    font-size: 0.8rem;
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    white-space: nowrap;
+  }
+  .paste-char-count {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-top: 6px;
+    text-align: right;
+  }
+
   @media (max-width: 600px) {
     .container { padding: 16px 12px; }
     .options { grid-template-columns: 1fr; }
     .drop-zone { padding: 32px 16px; }
+    .paste-zone .paste-title { flex-direction: column; }
   }
 </style>
 </head>
@@ -599,6 +685,12 @@
 <div class="container">
   <h2>Transcriu àudio a text amb Whisper</h2>
 
+  <div class="input-mode-tabs">
+    <button class="input-mode-tab active" data-mode="audio">&#127911; Àudio</button>
+    <button class="input-mode-tab" data-mode="paste">&#128203; Enganxar text</button>
+  </div>
+
+  <div id="audioInputArea">
   <div class="drop-zone" id="dropZone">
     <div class="icon">&#127911;</div>
     <div class="label">Arrossega un fitxer d'àudio o <strong>fes clic</strong></div>
@@ -663,8 +755,22 @@
     </div>
   </div>
 
-  <button class="btn" id="btnTranscribe" disabled>
+  </div><!-- /audioInputArea -->
+
+  <div class="paste-zone" id="pasteInputArea">
+    <div class="paste-title">
+      <label>Títol</label>
+      <input type="text" id="pasteTitle" placeholder="Ex: Reunió equip TI 3 Nov 2026">
+    </div>
+    <textarea id="pasteText" placeholder="Enganxa aquí el text de la transcripció..."></textarea>
+    <div class="paste-char-count" id="pasteCharCount">0 caràcters</div>
+  </div>
+
+  <button class="btn" id="btnTranscribe" disabled style="display:block">
     <span>&#9654;</span> Transcriure
+  </button>
+  <button class="btn" id="btnPasteSubmit" disabled style="display:none">
+    <span>&#128203;</span> Processar text
   </button>
 
   <div class="progress-area" id="progressArea">
@@ -742,6 +848,52 @@
 <script>
 const $ = id => document.getElementById(id);
 const BASE = window.location.pathname.replace(/\/$/, '');
+
+// Input mode tabs (Audio / Paste)
+let inputMode = 'audio';
+document.querySelectorAll('.input-mode-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.input-mode-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    inputMode = tab.dataset.mode;
+    $('audioInputArea').style.display = inputMode === 'audio' ? '' : 'none';
+    $('pasteInputArea').style.display = inputMode === 'paste' ? 'block' : 'none';
+    $('btnTranscribe').style.display = inputMode === 'audio' ? 'block' : 'none';
+    $('btnPasteSubmit').style.display = inputMode === 'paste' ? 'block' : 'none';
+  });
+});
+
+// Paste textarea char counter and button enable
+$('pasteText').addEventListener('input', () => {
+  const len = $('pasteText').value.trim().length;
+  $('pasteCharCount').textContent = len.toLocaleString() + ' caràcters';
+  $('btnPasteSubmit').disabled = len === 0;
+});
+
+// Paste submit
+$('btnPasteSubmit').addEventListener('click', async () => {
+  const text = $('pasteText').value.trim();
+  if (!text) return;
+  $('btnPasteSubmit').disabled = true;
+  $('btnPasteSubmit').innerHTML = '<span class="spinner" style="display:inline-block;width:16px;height:16px"></span> Processant...';
+  try {
+    const res = await fetch(`${BASE}/paste-transcript`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, title: $('pasteTitle').value.trim() || 'Text enganxat'}),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    showResults(data.result, data.job_id);
+    loadHistory();
+    toast('Text processat correctament!');
+  } catch (e) {
+    toast('Error: ' + e.message);
+  } finally {
+    $('btnPasteSubmit').disabled = false;
+    $('btnPasteSubmit').innerHTML = '<span>&#128203;</span> Processar text';
+  }
+});
 const dropZone = $('dropZone');
 const fileInput = $('fileInput');
 const fileInfo = $('fileInfo');
